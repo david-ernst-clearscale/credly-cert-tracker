@@ -57,4 +57,21 @@ class DashboardRestApiConstruct(Construct):
             method_options["authorization_type"] = apigw.AuthorizationType.COGNITO
         compliance_resource.add_method("GET", integration, **method_options)
 
+        # Add CORS headers to API Gateway's own error responses (401/403/etc.) —
+        # otherwise a rejected/expired auth token comes back with no CORS headers
+        # and the browser reports it as a CORS failure instead of the real status.
+        for resp_type, resp_id in [
+            (apigw.ResponseType.DEFAULT_4_XX, "Default4xxCors"),
+            (apigw.ResponseType.DEFAULT_5_XX, "Default5xxCors"),
+        ]:
+            apigw.GatewayResponse(
+                self, resp_id,
+                rest_api=api,
+                type=resp_type,
+                response_headers={
+                    "Access-Control-Allow-Origin": "'https://d3ekm65uptt6j8.cloudfront.net'",
+                    "Access-Control-Allow-Headers": "'Authorization,Content-Type'",
+                },
+            )
+
         CfnOutput(self, "ApiUrl", value=api.url + "compliance")
