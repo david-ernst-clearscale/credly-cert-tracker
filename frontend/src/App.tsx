@@ -8,7 +8,7 @@ const REDIRECT_URI = window.location.origin;
 function decodeJwt(token: string): Record<string, unknown> {
   const seg = token.split('.').at(1)!;
   
-  const base64 = seg.replace(/-/g, '+').replace(/_/g, '/');
+  const base64 = seg[1].replace(/-/g, '+').replace(/_/g, '/');
   const padded = base64 + '='.repeat((4 - base64.length % 4) % 4);
   return JSON.parse(atob(padded));
 }
