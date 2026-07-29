@@ -3,18 +3,24 @@ from aws_cdk import (
     Duration, CfnOutput,
     aws_lambda as _lambda,
     aws_apigateway as apigw,
-    aws_dynamodb as dynamodb,
 )
 from constructs import Construct
 
 
 class DashboardRestApiConstruct(Construct):
-    def __init__(self, scope: Construct, id: str, *,
-                 certs_table: dynamodb.Table,
-                 users_table: dynamodb.Table):
-        super().__init__(scope, id)
+    def __init__(self, scope, id, certs_table, users_table, user_pool=None, **kwargs):
+        super().__init__(scope, id, **kwargs)
 
-        self.handler = _lambda.Function(
+        # Cognito authorizer (if user_pool provided)
+        self.authorizer = None
+        if user_pool:
+            self.authorizer = apigw.CognitoUserPoolsAuthorizer(
+                self, "CognitoAuth",
+                cognito_user_pools=[user_pool],
+            )
+
+        # Lambda handler
+        api_handler = _lambda.Function(
             self, "DashboardApiFn",
             function_name="credly-dashboard-api",
             runtime=_lambda.Runtime.PYTHON_3_12,
@@ -24,26 +30,31 @@ class DashboardRestApiConstruct(Construct):
                 "CERTS_TABLE": certs_table.table_name,
                 "USERS_TABLE": users_table.table_name,
             },
-            timeout=Duration.seconds(10),
+            timeout=Duration.seconds(30),
             memory_size=256,
         )
-        certs_table.grant_read_data(self.handler)
-        users_table.grant_read_data(self.handler)
+        certs_table.grant_read_data(api_handler)
+        users_table.grant_read_data(api_handler)
 
-        self.api = apigw.RestApi(
+        # REST API
+        api = apigw.RestApi(
             self, "DashboardApi",
-            rest_api_name="CertTracker-Dashboard-API",
+            rest_api_name="cert-tracker-dashboard",
             default_cors_preflight_options=apigw.CorsOptions(
-                allow_origins=apigw.Cors.ALL_ORIGINS,
+                allow_origins=["https://d3ekm65uptt6j8.cloudfront.net"],
                 allow_methods=["GET", "OPTIONS"],
+                allow_headers=["Authorization", "Content-Type"],
             ),
         )
 
-        compliance_resource = self.api.root.add_resource("compliance")
-        compliance_resource.add_method(
-            "GET",
-            apigw.LambdaIntegration(self.handler),
-        )
+        integration = apigw.LambdaIntegration(api_handler)
+        compliance_resource = api.root.add_resource("compliance")
 
-        CfnOutput(scope, "DashboardApiUrl",
-                  value=self.api.url)
+        # Attach authorizer if available
+        method_options = {}
+        if self.authorizer:
+            method_options["authorizer"] = self.authorizer
+            method_options["authorization_type"] = apigw.AuthorizationType.COGNITO
+        compliance_resource.add_method("GET", integration, **method_options)
+
+        CfnOutput(self, "ApiUrl", value=api.url + "compliance")

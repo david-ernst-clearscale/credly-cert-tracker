@@ -12,6 +12,7 @@ from aws_cdk import (
     aws_iam as iam,
 )
 from constructs import Construct
+from stacks.auth import AuthConstruct
 from stacks.cloudwatch_alarms import CertTrackerAlarmsConstruct
 from stacks.websocket_dashboard import WebSocketDashboardConstruct
 from stacks.static_hosting import StaticHostingConstruct
@@ -21,6 +22,17 @@ from stacks.rest_api import DashboardRestApiConstruct
 class CredlyCertTrackerStack(Stack):
     def __init__(self, scope: Construct, id: str, **kwargs):
         super().__init__(scope, id, **kwargs)
+
+        # Authentication (Google OAuth via Cognito)
+        auth = AuthConstruct(
+            self, "Auth",
+            cloudfront_domain="d3ekm65uptt6j8.cloudfront.net",
+            google_client_id=os.environ.get("GOOGLE_CLIENT_ID", ""),
+            google_client_secret=os.environ.get("GOOGLE_CLIENT_SECRET", ""),
+        )
+
+
+
 
         # ─── DynamoDB Tables ───
         users_table = dynamodb.Table(
@@ -183,6 +195,7 @@ class CredlyCertTrackerStack(Stack):
             self, "DashboardApi",
             certs_table=certs_table,
             users_table=users_table,
+            user_pool=auth.user_pool,
         )
 
         # ─── Static Hosting ───

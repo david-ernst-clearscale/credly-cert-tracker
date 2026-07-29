@@ -91,7 +91,7 @@ function CertTable({ certs }: { certs: CertEntry[] }) {
   )
 }
 
-export default function Dashboard() {
+export default function Dashboard({ token }: { token: string }) {
   const [data, setData] = useState<ComplianceData | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
