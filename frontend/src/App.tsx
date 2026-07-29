@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import Dashboard from './components/Dashboard';
+import Dashboard from './pages/Dashboard';
 
 const COGNITO_DOMAIN = import.meta.env.VITE_COGNITO_DOMAIN;
 const CLIENT_ID = import.meta.env.VITE_USER_POOL_CLIENT_ID;
