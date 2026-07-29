@@ -1,0 +1,9 @@
+cdk.out/
+.cdk.staging/
+__pycache__/
+*.py[cod]
+.venv/
+frontend/node_modules/
+frontend/dist/
+.env
+.env.local
