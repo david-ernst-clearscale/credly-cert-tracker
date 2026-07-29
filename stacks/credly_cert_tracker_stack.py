@@ -1,3 +1,4 @@
+import os
 """Main CDK Stack — wires all constructs together."""
 from aws_cdk import (
     Stack,
