@@ -97,7 +97,7 @@ export default function Dashboard({ token }: { token: string }) {
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
-    fetch(`${API_URL}/compliance`)
+    fetch(`${API_URL}/compliance`, { headers: { Authorization: `Bearer ${token}` } })
       .then(res => {
         if (!res.ok) throw new Error(`HTTP ${res.status}`)
         return res.json()
