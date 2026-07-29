@@ -6,7 +6,7 @@ const CLIENT_ID = import.meta.env.VITE_USER_POOL_CLIENT_ID;
 const REDIRECT_URI = window.location.origin;
 
 function decodeJwt(token: string): Record<string, unknown> {
-  const seg = token.split('.');
+  const seg = token.split('.').at(1)!;
   
   const base64 = seg.replace(/-/g, '+').replace(/_/g, '/');
   const padded = base64 + '='.repeat((4 - base64.length % 4) % 4);
