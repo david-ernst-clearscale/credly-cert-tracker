@@ -13,9 +13,53 @@ function decodeJwt(token: string): Record<string, unknown> {
   return JSON.parse(atob(padded));
 }
 
+function storeSession(idToken: string, email: string, expiresIn: number, refreshToken?: string) {
+  localStorage.setItem('cert_token', idToken);
+  localStorage.setItem('cert_email', email);
+  localStorage.setItem('cert_token_expires_at', String(Date.now() + expiresIn * 1000));
+  if (refreshToken) localStorage.setItem('cert_refresh_token', refreshToken);
+}
+
+function clearSession() {
+  localStorage.removeItem('cert_token');
+  localStorage.removeItem('cert_email');
+  localStorage.removeItem('cert_token_expires_at');
+  localStorage.removeItem('cert_refresh_token');
+}
+
+// Exchanges a stored refresh token for a fresh id_token, so a session doesn't just
+// die with a raw 401 once the 1-hour id_token expires. Returns null if the refresh
+// token itself is invalid/expired (e.g. revoked, or past Cognito's refresh-token TTL),
+// in which case the caller should fall back to a full sign-in.
+async function refreshAccessToken(refreshToken: string): Promise<{ id_token: string; expires_in: number } | null> {
+  try {
+    const r = await fetch(`${COGNITO_DOMAIN}/oauth2/token`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        grant_type: 'refresh_token',
+        client_id: CLIENT_ID,
+        refresh_token: refreshToken,
+      }),
+    });
+    const data = await r.json();
+    if (r.ok && data.id_token) {
+      return { id_token: data.id_token, expires_in: data.expires_in ?? 3600 };
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 function App() {
   const [user, setUser] = useState<{email: string, token: string} | null>(null);
   const [loading, setLoading] = useState(true);
+
+  const signOut = () => {
+    clearSession();
+    setUser(null);
+  };
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -49,9 +93,8 @@ function App() {
           if (data.id_token) {
             const payload = decodeJwt(data.id_token);
             const email = (payload.email as string) || '';
+            storeSession(data.id_token, email, data.expires_in ?? 3600, data.refresh_token);
             setUser({ email, token: data.id_token });
-            localStorage.setItem('cert_token', data.id_token);
-            localStorage.setItem('cert_email', email);
           }
           setLoading(false);
         })
@@ -59,10 +102,34 @@ function App() {
     } else {
       const token = localStorage.getItem('cert_token');
       const email = localStorage.getItem('cert_email');
-      if (token && email) {
-        setUser({ email, token });
+      const expiresAt = Number(localStorage.getItem('cert_token_expires_at') || 0);
+      const refreshToken = localStorage.getItem('cert_refresh_token');
+
+      if (!token || !email) {
+        setLoading(false);
+        return;
       }
-      setLoading(false);
+
+      // Refresh a little early (60s buffer) instead of waiting for the exact expiry
+      // instant — avoids a near-miss where the token dies mid-request.
+      if (Date.now() < expiresAt - 60_000) {
+        setUser({ email, token });
+        setLoading(false);
+      } else if (refreshToken) {
+        refreshAccessToken(refreshToken).then(result => {
+          if (result) {
+            storeSession(result.id_token, email, result.expires_in, refreshToken);
+            setUser({ email, token: result.id_token });
+          } else {
+            // Refresh token is dead too (revoked / past its own TTL) — back to sign-in.
+            clearSession();
+          }
+          setLoading(false);
+        });
+      } else {
+        clearSession();
+        setLoading(false);
+      }
     }
   }, []);
 
@@ -74,9 +141,7 @@ function App() {
   };
 
   const logout = () => {
-    localStorage.removeItem('cert_token');
-    localStorage.removeItem('cert_email');
-    setUser(null);
+    signOut();
     window.location.href = `${COGNITO_DOMAIN}/logout?client_id=${CLIENT_ID}&logout_uri=${encodeURIComponent(REDIRECT_URI)}`;
   };
 
@@ -103,7 +168,7 @@ function App() {
           <button onClick={logout} style={{padding:'6px 12px',cursor:'pointer',borderRadius:'4px',border:'1px solid #ddd',background:'white',color:'#000'}}>Logout</button>
         </div>
       </header>
-      <Dashboard token={user.token} />
+      <Dashboard token={user.token} onAuthError={signOut} />
     </div>
   );
 }
