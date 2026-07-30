@@ -172,11 +172,14 @@ class CredlyCertTrackerStack(Stack):
             targets=[targets.LambdaFunction(badge_sync_fn)],
         )
 
-        # ─── EventBridge: Hourly Expiration Check ───
+        # ─── EventBridge: Daily Expiration Check ───
+        # Runs once a day (1 hour after Badge Sync) rather than hourly — cert status
+        # only changes based on which calendar day it is (crossing the 90/60/30/0-day
+        # thresholds), so checking more than once a day has no effect.
         events.Rule(
-            self, "HourlyExpirationCheck",
-            rule_name="credly-hourly-expiration-check",
-            schedule=events.Schedule.rate(Duration.hours(1)),
+            self, "DailyExpirationCheck",
+            rule_name="credly-daily-expiration-check",
+            schedule=events.Schedule.cron(hour="7", minute="0"),
             targets=[targets.LambdaFunction(expiration_checker_fn)],
         )
 
