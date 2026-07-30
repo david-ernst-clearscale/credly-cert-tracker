@@ -71,17 +71,18 @@ def lambda_handler(event, context):
     for t, req in CLAUDE_REQS.items():
         c = claude_grouped.get(t, [])
         result["claude_tiers"][t] = {"current": len(c), "required": req if req > 0 else None, "percentage": round((len(c)/req)*100, 1) if req else None, "certifications": c}
-    aws_top = sorted(aws_counts.items(), key=lambda x: x[1], reverse=True)[:5]
-    claude_top = sorted(claude_counts.items(), key=lambda x: x[1], reverse=True)[:5]
+    aws_top = sorted(aws_counts.items(), key=lambda x: x[1], reverse=True)[:10]
+    claude_top = sorted(claude_counts.items(), key=lambda x: x[1], reverse=True)[:10]
     def with_ranks(entries):
+        # Dense ranking: ties share a rank, and the next distinct count is rank+1
+        # (not rank + number of people tied), e.g. 1,1,1,1,2,2,3 rather than 1,1,1,1,5,5,7.
         ranked = []
-        for i, (emp, cnt) in enumerate(entries):
-            if i == 0:
-                rank = 1
-            elif cnt == ranked[-1]["count"]:
-                rank = ranked[-1]["rank"]
-            else:
-                rank = i + 1
+        rank = 0
+        prev_count = None
+        for emp, cnt in entries:
+            if cnt != prev_count:
+                rank += 1
+                prev_count = cnt
             ranked.append({"employee": emp, "count": cnt, "rank": rank})
         return ranked
     result["leaderboard"]["aws"] = with_ranks(aws_top)
