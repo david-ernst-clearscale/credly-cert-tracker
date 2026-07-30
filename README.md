@@ -8,67 +8,6 @@ Serverless app that tracks AWS and Anthropic certifications across the team, com
 
 ![Dashboard screenshot](docs/images/architecture.png)
 
-
-```mermaid
-flowchart LR
-    subgraph WebApp["User & Dashboard (Web App)"]
-        User(["User<br/>Sign in with Google"])
-        Cognito["Amazon Cognito User Pool<br/>Google OAuth federation"]
-        CF["Amazon CloudFront<br/>Serves React dashboard"]
-        S3["Amazon S3<br/>Static dashboard build"]
-        User --> Cognito --> CF --> S3
-    end
-
-    subgraph APILayer["API Layer"]
-        APIGW["API Gateway REST API<br/>GET /compliance"]
-        Authorizer["Cognito Authorizer<br/>Validates JWT"]
-        DashFn["Lambda: dashboard-api<br/>Reads DynamoDB, returns<br/>tier compliance + leaderboard"]
-        APIGW --> Authorizer --> DashFn
-    end
-
-    CF -. "Bearer token" .-> APIGW
-    DashFn -. "JSON" .-> CF
-
-    subgraph Batch["Scheduled Processing"]
-        DailyRule["EventBridge Rule<br/>cron 0 6 * * ? *<br/>Daily 6 AM UTC"]
-        BadgeSync["Lambda: badge-sync<br/>Fetches Credly badges,<br/>upserts credly-certifications"]
-        HourlyRule["EventBridge Rule<br/>rate 1 hour"]
-        ExpChecker["Lambda: expiration-checker<br/>Recomputes status"]
-        DailyRule --> BadgeSync
-        HourlyRule --> ExpChecker
-    end
-
-    subgraph Data["Data Stores"]
-        UsersTable[("DynamoDB: credly-users<br/>PK employee_id")]
-        CertsTable[("DynamoDB: credly-certifications<br/>PK employee_id / SK certification_id<br/>GSI by-expiration: status / expires_at")]
-    end
-
-    BadgeSync --> CertsTable
-    BadgeSync -. reads .-> UsersTable
-    ExpChecker --> CertsTable
-    DashFn -. reads .-> CertsTable
-
-    subgraph Notif["Notifications — currently not firing, see below"]
-        SNS["SNS Topic<br/>CertTracker-Expiration-Alerts"]
-        NotifFn["Lambda: notification-handler<br/>SES email + Slack webhook"]
-    end
-
-    BadgeSync -. "would create EventBridge Scheduler<br/>one-time invokes per 90/60/30-day<br/>window (disabled today)" .-> NotifFn
-    SNS -. "subscribed, but nothing publishes to it" .-> NotifFn
-
-    subgraph Reporting["Reporting — trigger not wired up"]
-        ComplianceRptr["Lambda: compliance-reporter<br/>Publishes CloudWatch metrics"]
-        CW["CloudWatch: Metrics, Alarms"]
-        ComplianceRptr --> CW
-    end
-
-    subgraph External
-        Credly["Credly Public API<br/>www.credly.com<br/>No auth required"]
-    end
-
-    BadgeSync --> Credly
-```
-
 ## Components
 
 ### Frontend (`frontend/`)
