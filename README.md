@@ -5,7 +5,6 @@ Serverless app that tracks AWS and Anthropic certifications across the team, com
 **Live dashboard:** https://d3ekm65uptt6j8.cloudfront.net
 
 ## Architecture
-
 ![Dashboard screenshot](docs/images/architecture.png)
 
 ## Components
