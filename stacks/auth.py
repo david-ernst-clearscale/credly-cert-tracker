@@ -7,7 +7,7 @@ from constructs import Construct
 
 
 class AuthConstruct(Construct):
-    def __init__(self, scope, id, cloudfront_domain, google_client_id, google_client_secret, **kwargs):
+    def __init__(self, scope, id, cloudfront_domain, google_client_id, google_client_secret_name, **kwargs):
         super().__init__(scope, id, **kwargs)
 
         self.user_pool = cognito.UserPool(
@@ -29,7 +29,7 @@ class AuthConstruct(Construct):
             self, "GoogleIdP",
             user_pool=self.user_pool,
             client_id=google_client_id,
-            client_secret_value=SecretValue.unsafe_plain_text(google_client_secret),
+            client_secret_value=SecretValue.secrets_manager(google_client_secret_name),
             scopes=["openid", "email", "profile"],
             attribute_mapping=cognito.AttributeMapping(
                 email=cognito.ProviderAttribute.GOOGLE_EMAIL,
