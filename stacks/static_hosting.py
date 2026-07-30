@@ -6,11 +6,10 @@ from aws_cdk import (
     aws_cloudfront_origins as origins,
 )
 from constructs import Construct
-from stacks.ip_restriction import IpRestrictionConstruct
 
 
 class StaticHostingConstruct(Construct):
-    def __init__(self, scope: Construct, id: str, *, build_path: str = "./frontend/dist", allowed_ips: list[str] = None):
+    def __init__(self, scope: Construct, id: str, *, build_path: str = "./frontend/dist"):
         super().__init__(scope, id)
 
         self.bucket = s3.Bucket(
@@ -21,29 +20,12 @@ class StaticHostingConstruct(Construct):
             auto_delete_objects=True,
         )
 
-        # IP restriction (if IPs provided)
-        ip_function = None
-        if allowed_ips:
-            ip_restrict = IpRestrictionConstruct(self, "IpRestrict", allowed_ips=allowed_ips)
-            ip_function = ip_restrict.function
-
-        # Build behavior options
-        behavior_kwargs = {
-            "origin": origins.S3BucketOrigin.with_origin_access_control(self.bucket),
-            "viewer_protocol_policy": cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
-        }
-
-        if ip_function:
-            behavior_kwargs["function_associations"] = [
-                cloudfront.FunctionAssociation(
-                    function=ip_function,
-                    event_type=cloudfront.FunctionEventType.VIEWER_REQUEST,
-                )
-            ]
-
         self.distribution = cloudfront.Distribution(
             self, "Distribution",
-            default_behavior=cloudfront.BehaviorOptions(**behavior_kwargs),
+            default_behavior=cloudfront.BehaviorOptions(
+                origin=origins.S3BucketOrigin.with_origin_access_control(self.bucket),
+                viewer_protocol_policy=cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+            ),
             default_root_object="index.html",
             error_responses=[
                 cloudfront.ErrorResponse(

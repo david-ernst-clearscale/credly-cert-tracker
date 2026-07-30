@@ -151,7 +151,6 @@ function App() {
     return (
       <div style={{display:'flex',flexDirection:'column',justifyContent:'center',alignItems:'center',height:'100vh',gap:'20px'}}>
         <h1>Certification Compliance Dashboard</h1>
-        <p>Sign in with your @clearscale.com Google account</p>
         <button onClick={login} style={{padding:'12px 24px',fontSize:'16px',cursor:'pointer',borderRadius:'8px',border:'1px solid #ddd',background:'white',color:'#000',boxShadow:'0 2px 4px rgba(0,0,0,0.1)'}}>
           Sign in with Google
         </button>
