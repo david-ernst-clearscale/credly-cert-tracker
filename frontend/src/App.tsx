@@ -87,7 +87,7 @@ function App() {
       <div style={{display:'flex',flexDirection:'column',justifyContent:'center',alignItems:'center',height:'100vh',gap:'20px'}}>
         <h1>Certification Compliance Dashboard</h1>
         <p>Sign in with your @clearscale.com Google account</p>
-        <button onClick={login} style={{padding:'12px 24px',fontSize:'16px',cursor:'pointer',borderRadius:'8px',border:'1px solid #ddd',background:'white',boxShadow:'0 2px 4px rgba(0,0,0,0.1)'}}>
+        <button onClick={login} style={{padding:'12px 24px',fontSize:'16px',cursor:'pointer',borderRadius:'8px',border:'1px solid #ddd',background:'white',color:'#000',boxShadow:'0 2px 4px rgba(0,0,0,0.1)'}}>
           Sign in with Google
         </button>
       </div>
@@ -100,7 +100,7 @@ function App() {
         <h2 style={{margin:0}}>Certification Compliance Dashboard</h2>
         <div style={{display:'flex',alignItems:'center',gap:'12px'}}>
           <span>{user.email}</span>
-          <button onClick={logout} style={{padding:'6px 12px',cursor:'pointer',borderRadius:'4px',border:'1px solid #ddd',background:'white'}}>Logout</button>
+          <button onClick={logout} style={{padding:'6px 12px',cursor:'pointer',borderRadius:'4px',border:'1px solid #ddd',background:'white',color:'#000'}}>Logout</button>
         </div>
       </header>
       <Dashboard token={user.token} />
