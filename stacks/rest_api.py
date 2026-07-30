@@ -8,7 +8,7 @@ from constructs import Construct
 
 
 class DashboardRestApiConstruct(Construct):
-    def __init__(self, scope, id, certs_table, users_table, user_pool=None, **kwargs):
+    def __init__(self, scope, id, certs_table, users_table, allowed_origin, user_pool=None, **kwargs):
         super().__init__(scope, id, **kwargs)
 
         # Cognito authorizer (if user_pool provided)
@@ -29,6 +29,7 @@ class DashboardRestApiConstruct(Construct):
             environment={
                 "CERTS_TABLE": certs_table.table_name,
                 "USERS_TABLE": users_table.table_name,
+                "ALLOWED_ORIGIN": allowed_origin,
             },
             timeout=Duration.seconds(30),
             memory_size=256,
@@ -41,7 +42,7 @@ class DashboardRestApiConstruct(Construct):
             self, "DashboardApi",
             rest_api_name="cert-tracker-dashboard",
             default_cors_preflight_options=apigw.CorsOptions(
-                allow_origins=["https://d3ekm65uptt6j8.cloudfront.net"],
+                allow_origins=[allowed_origin],
                 allow_methods=["GET", "OPTIONS"],
                 allow_headers=["Authorization", "Content-Type"],
             ),
@@ -69,7 +70,7 @@ class DashboardRestApiConstruct(Construct):
                 rest_api=api,
                 type=resp_type,
                 response_headers={
-                    "Access-Control-Allow-Origin": "'https://d3ekm65uptt6j8.cloudfront.net'",
+                    "Access-Control-Allow-Origin": f"'{allowed_origin}'",
                     "Access-Control-Allow-Headers": "'Authorization,Content-Type'",
                 },
             )

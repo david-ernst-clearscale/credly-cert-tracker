@@ -20,9 +20,20 @@ function App() {
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const code = params.get('code');
+    const returnedState = params.get('state');
 
     if (code) {
+      const expectedState = sessionStorage.getItem('oauth_state');
+      sessionStorage.removeItem('oauth_state');
       window.history.replaceState({}, '', '/');
+
+      if (!expectedState || returnedState !== expectedState) {
+        // Missing/mismatched state — this login redirect wasn't the one we initiated.
+        // Don't exchange the code; bail back to the sign-in screen.
+        setLoading(false);
+        return;
+      }
+
       fetch(`${COGNITO_DOMAIN}/oauth2/token`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -56,7 +67,9 @@ function App() {
   }, []);
 
   const login = () => {
-    const url = `${COGNITO_DOMAIN}/oauth2/authorize?response_type=code&client_id=${CLIENT_ID}&redirect_uri=${encodeURIComponent(REDIRECT_URI)}&scope=openid+email+profile&identity_provider=Google`;
+    const state = crypto.randomUUID();
+    sessionStorage.setItem('oauth_state', state);
+    const url = `${COGNITO_DOMAIN}/oauth2/authorize?response_type=code&client_id=${CLIENT_ID}&redirect_uri=${encodeURIComponent(REDIRECT_URI)}&scope=openid+email+profile&identity_provider=Google&state=${state}`;
     window.location.href = url;
   };
 

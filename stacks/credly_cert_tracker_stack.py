@@ -15,7 +15,6 @@ from aws_cdk import (
 from constructs import Construct
 from stacks.auth import AuthConstruct
 from stacks.cloudwatch_alarms import CertTrackerAlarmsConstruct
-from stacks.websocket_dashboard import WebSocketDashboardConstruct
 from stacks.static_hosting import StaticHostingConstruct
 from stacks.rest_api import DashboardRestApiConstruct
 
@@ -24,16 +23,24 @@ class CredlyCertTrackerStack(Stack):
     def __init__(self, scope: Construct, id: str, **kwargs):
         super().__init__(scope, id, **kwargs)
 
+        # ─── Static Hosting (created first so Auth/CORS can reference its real domain) ───
+        hosting = StaticHostingConstruct(
+            self, "Hosting",
+            build_path="./frontend/dist",
+        )
+        dashboard_origin = f"https://{hosting.distribution.distribution_domain_name}"
+
         # Authentication (Google OAuth via Cognito)
+        # Google client secret is stored in Secrets Manager (not passed as a plaintext
+        # CDK value) so it never lands in the CloudFormation template in the clear.
         auth = AuthConstruct(
             self, "Auth",
-            cloudfront_domain="d3ekm65uptt6j8.cloudfront.net",
+            cloudfront_domain=hosting.distribution.distribution_domain_name,
             google_client_id=os.environ.get("GOOGLE_CLIENT_ID", ""),
-            google_client_secret=os.environ.get("GOOGLE_CLIENT_SECRET", ""),
+            google_client_secret_name=os.environ.get(
+                "GOOGLE_CLIENT_SECRET_NAME", "credly-cert-tracker/google-oauth-client-secret"
+            ),
         )
-
-
-
 
         # ─── DynamoDB Tables ───
         users_table = dynamodb.Table(
@@ -184,23 +191,13 @@ class CredlyCertTrackerStack(Stack):
             notification_handler_fn=notification_handler_fn,
         )
 
-        # ─── WebSocket Dashboard ───
-        WebSocketDashboardConstruct(
-            self, "WebSocketDashboard",
-            certs_table=certs_table,
-            users_table=users_table,
-        )
-
         # ─── REST API for Dashboard ───
         DashboardRestApiConstruct(
             self, "DashboardApi",
             certs_table=certs_table,
             users_table=users_table,
             user_pool=auth.user_pool,
+            allowed_origin=dashboard_origin,
         )
 
-        # ─── Static Hosting ───
-        StaticHostingConstruct(
-            self, "Hosting",
-            build_path="./frontend/dist",
-        )
+
