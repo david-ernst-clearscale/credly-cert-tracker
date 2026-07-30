@@ -203,5 +203,4 @@ class CredlyCertTrackerStack(Stack):
         StaticHostingConstruct(
             self, "Hosting",
             build_path="./frontend/dist",
-            allowed_ips=["47.194.165.13"],
         )
