@@ -30,6 +30,11 @@ AWS_CERT_ISSUERS = [
     "AWS",
 ]
 
+# Name markers for badges that carry "AWS Certified" but are NOT actual credentials
+# (e.g. the "AWS Certified AI Practitioner Early Adopter" beta badge). These are
+# excluded so they don't inflate cert counts or appear on the dashboard.
+NON_CERT_MARKERS = ("Early Adopter",)
+
 
 def lambda_handler(event: dict, context: Any) -> dict:
     """Daily badge sync: fetch badges from Credly for all opted-in users."""
@@ -156,6 +161,8 @@ def fetch_credly_badges(username: str) -> list:
 def is_aws_badge(badge: dict) -> bool:
     """Check if a badge is a valid certification (AWS or Claude)."""
     name = badge.get("badge_template", {}).get("name", "")
+    if any(marker in name for marker in NON_CERT_MARKERS):
+        return False
     if "AWS Certified" in name:
         return True
     if "Claude Certified" in name:

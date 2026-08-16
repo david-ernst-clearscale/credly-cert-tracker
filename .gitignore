@@ -7,5 +7,7 @@ frontend/node_modules/
 frontend/dist/
 .env
 .env.local
-.env
-.env
+
+# Contains employee names + work emails — keep out of the (public) repo.
+# The Lambda bundles it from local disk at deploy time, so it needn't be tracked.
+lambda/dashboard_api/apn_roster.json
