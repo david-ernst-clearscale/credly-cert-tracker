@@ -71,7 +71,8 @@ def parse_apn_csv(text):
         if not email or email.upper().startswith("XXX") or name.upper().startswith("XXX"):
             redacted_certs.append(cert)
             continue
-        p = people.setdefault(email.lower(), {"name": name, "email": email, "certs": []})
+        # Work email is read only to detect redacted rows and de-dupe; not stored.
+        p = people.setdefault(name.lower(), {"name": name, "certs": []})
         p["certs"].append(cert)
     for p in people.values():
         if p["name"] and p["name"] == p["name"].lower():
@@ -199,7 +200,7 @@ def get_credly_accounts():
     return accounts
 
 
-def build_apn_network(roster, aws_holder_ids):
+def build_apn_network(roster, aws_holder_ids, aws_counts=None):
     """Cross-reference the APN roster against Credly accounts.
 
     matched  = APN person who has a Credly account (green check)
@@ -216,7 +217,6 @@ def build_apn_network(roster, aws_holder_ids):
         all_roster_keys |= person_keys
         entry = {
             "name": person.get("name", ""),
-            "email": person.get("email", ""),
             "apn_cert_count": len(person.get("certs", [])),
             "certs": person.get("certs", []),
         }
@@ -231,12 +231,15 @@ def build_apn_network(roster, aws_holder_ids):
 
     # Reverse direction: Credly users who hold an AWS cert but are NOT on the APN list.
     # Excludes anyone without an AWS cert (e.g. Anthropic-only or no certs).
+    aws_counts = aws_counts or {}
     credly_only = [
-        {"name": a["name"], "email": a["email"], "credly_username": a["credly_username"]}
+        {"name": a["name"], "credly_username": a["credly_username"],
+         "aws_cert_count": aws_counts.get(a["employee_id"], 0)}
         for a in accounts
         if a["employee_id"] in aws_holder_ids and not (a["keys"] & all_roster_keys)
     ]
-    credly_only.sort(key=lambda e: e["name"].lower())
+    # Most AWS certs first (prioritize who to get onto the APN list), then alphabetical.
+    credly_only.sort(key=lambda e: (-e.get("aws_cert_count", 0), e["name"].lower()))
     # Subtotal the redacted ("Not Trackable") records by certification so we can see
     # what APN reports in that bucket even though the owners are masked.
     redacted_certs = roster.get("redacted_certs", [])
@@ -368,7 +371,7 @@ def handle_compliance(event, context=None):
         return ranked
     result["leaderboard"]["aws"] = with_ranks(aws_sorted)
     result["leaderboard"]["claude"] = with_ranks(claude_sorted)
-    result["apn_network"] = build_apn_network(get_roster(), aws_holder_ids)
+    result["apn_network"] = build_apn_network(get_roster(), aws_holder_ids, aws_counts)
     return {"statusCode": 200, "headers": {"Content-Type": "application/json", "Access-Control-Allow-Origin": os.environ.get("ALLOWED_ORIGIN", "")}, "body": json.dumps(result)}
 
 
@@ -401,8 +404,6 @@ def handle_list_users(event):
             {
                 "employee_id": u.get("employee_id", ""),
                 "credly_username": u.get("credly_username", ""),
-                "email": u.get("email", ""),
-                "consent_status": u.get("consent_status", "opted_in"),
             }
             for u in items
         ),
@@ -426,21 +427,16 @@ def handle_upsert_user(event):
     if not employee_id:
         return _resp(400, {"error": "employee_id is required (e.g. first.last)."})
     credly_username = (data.get("credly_username") or "").strip()
-    email = (data.get("email") or "").strip()
-    consent_status = (data.get("consent_status") or "opted_in").strip()
-    if consent_status not in ("opted_in", "opted_out"):
-        return _resp(400, {"error": "consent_status must be 'opted_in' or 'opted_out'."})
     # update_item upserts (creates if the key is absent) and preserves any other
-    # attributes on the record that this form doesn't manage (e.g. a stored name).
+    # attributes on the record that this form doesn't manage.
     dynamodb.Table(USERS_TABLE).update_item(
         Key={"employee_id": employee_id},
-        UpdateExpression="SET credly_username = :c, email = :e, consent_status = :s",
-        ExpressionAttributeValues={":c": credly_username, ":e": email, ":s": consent_status},
+        UpdateExpression="SET credly_username = :c",
+        ExpressionAttributeValues={":c": credly_username},
     )
     logger.info(f"User {employee_id} upserted by {_caller_email(event)}")
     return _resp(200, {"ok": True, "user": {
         "employee_id": employee_id, "credly_username": credly_username,
-        "email": email, "consent_status": consent_status,
     }})
 
 
