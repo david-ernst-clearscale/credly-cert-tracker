@@ -51,7 +51,8 @@ class DashboardRestApiConstruct(Construct):
             timeout=Duration.seconds(30),
             memory_size=256,
         )
-        certs_table.grant_read_data(api_handler)
+        # read/write: deleting a user also removes their cert records.
+        certs_table.grant_read_write_data(api_handler)
         # read/write: the Users tab adds and edits records in the users table.
         users_table.grant_read_write_data(api_handler)
         roster_bucket.grant_read_write(api_handler)
@@ -65,7 +66,7 @@ class DashboardRestApiConstruct(Construct):
             rest_api_name="cert-tracker-dashboard",
             default_cors_preflight_options=apigw.CorsOptions(
                 allow_origins=[allowed_origin],
-                allow_methods=["GET", "POST", "OPTIONS"],
+                allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
                 allow_headers=["Authorization", "Content-Type"],
             ),
         )
@@ -90,6 +91,8 @@ class DashboardRestApiConstruct(Construct):
         users_resource = api.root.add_resource("users")
         users_resource.add_method("GET", integration, **method_options)
         users_resource.add_method("POST", integration, **method_options)
+        # DELETE removes a user and their cert records (admin-only, enforced in Lambda).
+        users_resource.add_method("DELETE", integration, **method_options)
 
         # POST /sync — trigger an on-demand badge sync (admin-only).
         sync_resource = api.root.add_resource("sync")

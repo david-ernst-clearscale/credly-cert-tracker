@@ -2,6 +2,7 @@
 import os, json, csv, io, base64, logging, boto3
 from collections import defaultdict
 from datetime import datetime, timezone
+from boto3.dynamodb.conditions import Key
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -256,6 +257,7 @@ def build_apn_network(roster, aws_holder_ids, aws_counts=None):
         "credly_only": credly_only,
         "redacted_count": roster.get("redacted_count", len(redacted_certs)),
         "redacted_breakdown": redacted_breakdown,
+        "redacted_certs": redacted_certs,
         "total_named": len(matched) + len(missing),
         "uploaded_at": roster.get("uploaded_at", ""),
     }
@@ -440,6 +442,36 @@ def handle_upsert_user(event):
     }})
 
 
+def handle_delete_user(event):
+    """DELETE /users — remove a user and all their cert records. Admin-only."""
+    if not _is_admin(event):
+        return _resp(403, {"error": "You don't have permission to delete users."})
+    try:
+        data = json.loads(event.get("body") or "{}")
+    except ValueError:
+        return _resp(400, {"error": "Invalid JSON body."})
+    employee_id = (data.get("employee_id") or "").strip()
+    if not employee_id:
+        return _resp(400, {"error": "employee_id is required."})
+    # Remove the user's cert records first (keyed on the same employee_id) so they
+    # don't linger in the tiers/leaderboard, then remove the user record itself.
+    certs = dynamodb.Table(CERTS_TABLE)
+    resp = certs.query(KeyConditionExpression=Key("employee_id").eq(employee_id))
+    items = resp.get("Items", [])
+    while "LastEvaluatedKey" in resp:
+        resp = certs.query(
+            KeyConditionExpression=Key("employee_id").eq(employee_id),
+            ExclusiveStartKey=resp["LastEvaluatedKey"],
+        )
+        items.extend(resp.get("Items", []))
+    with certs.batch_writer() as bw:
+        for it in items:
+            bw.delete_item(Key={"employee_id": employee_id, "certification_id": it["certification_id"]})
+    dynamodb.Table(USERS_TABLE).delete_item(Key={"employee_id": employee_id})
+    logger.info(f"User {employee_id} deleted ({len(items)} certs) by {_caller_email(event)}")
+    return _resp(200, {"ok": True, "deleted": employee_id, "certs_removed": len(items)})
+
+
 def handle_trigger_sync(event):
     """POST /sync — kick off the badge-sync Lambda asynchronously. Admin-only."""
     if not _is_admin(event):
@@ -467,6 +499,8 @@ def lambda_handler(event, context):
             return handle_list_users(event)
         if method == "POST":
             return handle_upsert_user(event)
+        if method == "DELETE":
+            return handle_delete_user(event)
     if resource.endswith("/sync") and method == "POST":
         return handle_trigger_sync(event)
     if resource.endswith("/apn-roster") and method == "POST":
