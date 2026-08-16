@@ -251,6 +251,25 @@ def build_apn_network(roster, aws_holder_ids, aws_counts=None):
         {"tier": t, "count": counts.get(t, 0)}
         for t in AWS_REQS  # Foundational, Technical, Professional/Specialty — same 3 groupings
     ]
+    # APN-side tier totals as distinct NAMED individuals (same tier logic as the Credly
+    # side), for the Credly-vs-APN comparison. Redacted records can't be attributed to a
+    # person, so they're excluded here (a lower bound on AWS's true count).
+    apn_found, apn_tech, apn_ps = set(), set(), set()
+    for person in roster.get("people", []):
+        pid = _norm(person.get("name", ""))
+        for cert in person.get("certs", []):
+            band = classify_aws(cert.get("name", ""))
+            if band == "Foundational":
+                apn_found.add(pid)
+            else:
+                apn_tech.add(pid)
+                if band == "Professional/Specialty":
+                    apn_ps.add(pid)
+    apn_tiers = {
+        "Foundational": len(apn_found),
+        "Technical": len(apn_tech),
+        "Professional/Specialty": len(apn_ps),
+    }
     return {
         "matched": matched,
         "missing": missing,
@@ -258,6 +277,7 @@ def build_apn_network(roster, aws_holder_ids, aws_counts=None):
         "redacted_count": roster.get("redacted_count", len(redacted_certs)),
         "redacted_breakdown": redacted_breakdown,
         "redacted_certs": redacted_certs,
+        "apn_tiers": apn_tiers,
         "total_named": len(matched) + len(missing),
         "uploaded_at": roster.get("uploaded_at", ""),
     }
@@ -314,6 +334,11 @@ def handle_compliance(event, context=None):
     claude_grouped = {"CCAR-F": [], "CCAR-P": [], "CCDV-F": [], "CCAO-F": []}
     aws_counts = defaultdict(int)
     claude_counts = defaultdict(int)
+    # AWS partner tiers are measured in DISTINCT CERTIFIED INDIVIDUALS, not certs — a
+    # person holding 3 Technical certs counts once. "Technical" = any non-Foundational
+    # cert (Associate/Professional/Specialty); Professional/Specialty is a SUBSET of it.
+    aws_individuals = {"Foundational": set(), "Technical": set(), "Professional/Specialty": set()}
+    claude_individuals = {"CCAR-F": set(), "CCAR-P": set(), "CCDV-F": set(), "CCAO-F": set()}
     # A person can hold more than one Credly badge for the SAME credential (e.g. a
     # re-certification issues a new badge id, and Credly sometimes returns one record
     # with no expiry and another with a real one). Collapse those to a single entry per
@@ -341,18 +366,41 @@ def handle_compliance(event, context=None):
             continue
         employee = entry["employee"]
         if "AWS Certified" in name:
-            aws_grouped[classify_aws(name)].append(entry)
+            band = classify_aws(name)
             aws_counts[employee] += 1
+            if band == "Foundational":
+                aws_grouped["Foundational"].append(entry)
+                aws_individuals["Foundational"].add(employee)
+            else:
+                # Associate, Professional, and Specialty all count as "Technical".
+                aws_grouped["Technical"].append(entry)
+                aws_individuals["Technical"].add(employee)
+                if band == "Professional/Specialty":
+                    aws_grouped["Professional/Specialty"].append(entry)
+                    aws_individuals["Professional/Specialty"].add(employee)
         elif "Claude Certified" in name:
-            claude_grouped[classify_claude(name)].append(entry)
+            cband = classify_claude(name)
+            claude_grouped[cband].append(entry)
             claude_counts[employee] += 1
+            claude_individuals[cband].add(employee)
     result = {"timestamp": datetime.now(timezone.utc).isoformat(), "aws_tiers": {}, "claude_tiers": {}, "leaderboard": {}}
     for t, req in AWS_REQS.items():
         c = aws_grouped.get(t, [])
-        result["aws_tiers"][t] = {"current": len(c), "required": req, "percentage": round((len(c)/req)*100, 1) if req else 0, "certifications": c}
+        n = len(aws_individuals[t])   # distinct certified individuals, not cert count
+        # One row per distinct person in this tier (each counted once), with how many
+        # certs they hold in it — for the "individuals" compliance view on the APN tab.
+        per_person = defaultdict(int)
+        for e in c:
+            per_person[e["employee"]] += 1
+        individuals = sorted(
+            ({"employee": emp, "count": cnt} for emp, cnt in per_person.items()),
+            key=lambda x: (-x["count"], x["employee"]),
+        )
+        result["aws_tiers"][t] = {"current": n, "required": req, "percentage": round((n/req)*100, 1) if req else 0, "certifications": c, "cert_count": len(c), "individuals": individuals}
     for t, req in CLAUDE_REQS.items():
         c = claude_grouped.get(t, [])
-        result["claude_tiers"][t] = {"current": len(c), "required": req if req > 0 else None, "percentage": round((len(c)/req)*100, 1) if req else None, "certifications": c}
+        n = len(claude_individuals[t])
+        result["claude_tiers"][t] = {"current": n, "required": req if req > 0 else None, "percentage": round((n/req)*100, 1) if req else None, "certifications": c, "cert_count": len(c)}
     aws_sorted = sorted(aws_counts.items(), key=lambda x: x[1], reverse=True)
     claude_sorted = sorted(claude_counts.items(), key=lambda x: x[1], reverse=True)
     def with_ranks(entries, max_rank=10):
