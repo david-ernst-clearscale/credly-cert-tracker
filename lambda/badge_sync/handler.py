@@ -40,7 +40,7 @@ def lambda_handler(event: dict, context: Any) -> dict:
     """Daily badge sync: fetch badges from Credly for all opted-in users."""
     logger.info("Starting daily badge sync")
 
-    users = get_opted_in_users()
+    users = get_tracked_users()
     logger.info(f"Processing {len(users)} users")
 
     results = {"synced": 0, "errors": 0, "new_certs": 0, "updated": 0}
@@ -56,19 +56,12 @@ def lambda_handler(event: dict, context: Any) -> dict:
     return results
 
 
-def get_opted_in_users() -> list:
-    """Get all users who have consented to tracking."""
-    response = users_table.scan(
-        FilterExpression="consent_status = :status",
-        ExpressionAttributeValues={":status": "opted_in"},
-    )
+def get_tracked_users() -> list:
+    """Get all users in the table — every user is tracked."""
+    response = users_table.scan()
     users = response.get("Items", [])
     while "LastEvaluatedKey" in response:
-        response = users_table.scan(
-            FilterExpression="consent_status = :status",
-            ExpressionAttributeValues={":status": "opted_in"},
-            ExclusiveStartKey=response["LastEvaluatedKey"],
-        )
+        response = users_table.scan(ExclusiveStartKey=response["LastEvaluatedKey"])
         users.extend(response.get("Items", []))
     return users
 
