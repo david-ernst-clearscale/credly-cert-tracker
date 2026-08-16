@@ -27,6 +27,9 @@ class CredlyCertTrackerStack(Stack):
         hosting = StaticHostingConstruct(
             self, "Hosting",
             build_path="./frontend/dist",
+            # Who gets emailed if the site goes down / the bucket empties.
+            # Override with ALERT_EMAIL in the deploy environment.
+            alert_email=os.environ.get("ALERT_EMAIL", "david.ernst@clearscale.com"),
         )
         dashboard_origin = f"https://{hosting.distribution.distribution_domain_name}"
 
@@ -164,18 +167,20 @@ class CredlyCertTrackerStack(Stack):
         badge_sync_fn.add_environment("NOTIFICATION_LAMBDA_ARN", notification_handler_fn.function_arn)
         badge_sync_fn.add_environment("SCHEDULER_ROLE_ARN", "")
 
-        # ─── EventBridge: Daily Sync Schedule ───
+        # ─── EventBridge: Daily 7 AM UTC schedule ───
+        # Badge Sync and the Expiration Check run as two separate functions on the same
+        # daily 7 AM trigger. They don't need to be ordered: the checker derives status
+        # purely from each cert's stored expires_at and the current date (crossing the
+        # 90/60/30/0-day thresholds), and Badge Sync sets status on any cert it writes —
+        # so it doesn't matter which finishes first on a given morning. Running once a
+        # day is enough because status only changes with the calendar day.
         events.Rule(
             self, "DailySyncRule",
             rule_name="credly-daily-badge-sync",
-            schedule=events.Schedule.cron(hour="6", minute="0"),
+            schedule=events.Schedule.cron(hour="7", minute="0"),
             targets=[targets.LambdaFunction(badge_sync_fn)],
         )
 
-        # ─── EventBridge: Daily Expiration Check ───
-        # Runs once a day (1 hour after Badge Sync) rather than hourly — cert status
-        # only changes based on which calendar day it is (crossing the 90/60/30/0-day
-        # thresholds), so checking more than once a day has no effect.
         events.Rule(
             self, "DailyExpirationCheck",
             rule_name="credly-daily-expiration-check",
@@ -201,6 +206,11 @@ class CredlyCertTrackerStack(Stack):
             users_table=users_table,
             user_pool=auth.user_pool,
             allowed_origin=dashboard_origin,
+            # Powers the Users tab: badge_sync_fn backs the "Sync now" button, and
+            # admin_emails gates who can add/edit users. Override ADMIN_EMAILS
+            # (comma-separated) in the deploy environment.
+            badge_sync_fn=badge_sync_fn,
+            admin_emails=os.environ.get("ADMIN_EMAILS", "david.ernst@clearscale.com"),
         )
 
 
