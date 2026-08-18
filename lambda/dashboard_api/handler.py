@@ -1,5 +1,5 @@
 """REST API for dashboard — pulls data directly from DynamoDB."""
-import os, json, csv, io, base64, logging, boto3
+import os, json, csv, io, base64, logging, urllib.request, urllib.parse, boto3
 from collections import defaultdict
 from datetime import datetime, timezone
 from boto3.dynamodb.conditions import Key
@@ -19,6 +19,110 @@ ROSTER_KEY = "apn_roster.json"
 ADMIN_EMAILS = {e.strip().lower() for e in os.environ.get("ADMIN_EMAILS", "").split(",") if e.strip()}
 BADGE_SYNC_FUNCTION = os.environ.get("BADGE_SYNC_FUNCTION", "")
 lambda_client = boto3.client("lambda")
+secrets = boto3.client("secretsmanager")
+SLACK_WEBHOOK_SECRET = os.environ.get("SLACK_WEBHOOK_SECRET", "")
+SLACK_BOT_TOKEN_SECRET = os.environ.get("SLACK_BOT_TOKEN_SECRET", "")
+# We don't store work emails, so derive one from employee_id (first.last) for the Slack
+# lookup: first.last@<EMAIL_DOMAIN>. A real stored email (if present) always wins.
+EMAIL_DOMAIN = os.environ.get("EMAIL_DOMAIN", "clearscale.com")
+
+# Slack member ID for Salome (the cert-sharing consent contact). Replace with her real
+# member ID (in Slack: her profile → ⋮ More → Copy member ID) so the digest @-tags her.
+# Until then it falls back to plain text "Salome" (no ping).
+SALOME_SLACK_ID = "U065UKPB942"  # salome.chimakadze
+SALOME_MENTION = "Salome" if SALOME_SLACK_ID.startswith("REPLACE") else f"<@{SALOME_SLACK_ID}>"
+
+# Instructions posted with the weekly Slack digest. Edit this text to change the guidance.
+GAP_INSTRUCTIONS = (
+    "*How to get counted toward Clearscale's AWS Partner tier:*\n"
+    "1. You do *not* need a @clearscale.com email; keep your personal AWS / Builder ID account.\n"
+    "2. Go to *AWS Skill Builder → My Profile → AWS Training and Certification badges → Certification "
+    "Data* and make sure the checkbox allowing AWS to share your certification data with Clearscale is "
+    "selected. Even if your account is already linked, this box can be *unchecked* — that's what makes "
+    "you show in APN as a redacted “XXX-XXX-XXX” record instead of under your name.\n"
+    f"3. If that checkbox is greyed out or disabled, that's a known AWS-side issue we're working "
+    f"through; reach out to {SALOME_MENTION} and she can help.\n"
+    "_After you enable it, it can take a few days to show up in APN. You're listed because Credly shows "
+    "you hold an active AWS cert and we can't confirm it's shared with Clearscale._"
+)
+
+_slack_webhook_cache = None
+
+
+def get_slack_webhook():
+    """Fetch the Slack incoming-webhook URL from Secrets Manager (cached per container)."""
+    global _slack_webhook_cache
+    if _slack_webhook_cache is not None:
+        return _slack_webhook_cache
+    if not SLACK_WEBHOOK_SECRET:
+        return ""
+    try:
+        _slack_webhook_cache = secrets.get_secret_value(SecretId=SLACK_WEBHOOK_SECRET)["SecretString"].strip()
+    except Exception as e:
+        logger.error(f"Could not read Slack webhook secret: {e}")
+        _slack_webhook_cache = ""
+    return _slack_webhook_cache
+
+
+def post_slack(text):
+    url = get_slack_webhook()
+    if not url:
+        logger.warning("No Slack webhook configured; skipping post.")
+        return False
+    data = json.dumps({"text": text}).encode("utf-8")
+    req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
+    urllib.request.urlopen(req, timeout=10)
+    return True
+
+
+_slack_bot_token_cache = None
+_slack_id_cache = {}
+
+
+def get_slack_bot_token():
+    """Slack bot token (xoxb-…) from Secrets Manager, for users.lookupByEmail. Cached."""
+    global _slack_bot_token_cache
+    if _slack_bot_token_cache is not None:
+        return _slack_bot_token_cache
+    if not SLACK_BOT_TOKEN_SECRET:
+        _slack_bot_token_cache = ""
+        return ""
+    try:
+        _slack_bot_token_cache = secrets.get_secret_value(SecretId=SLACK_BOT_TOKEN_SECRET)["SecretString"].strip()
+    except Exception as e:
+        logger.error(f"Could not read Slack bot token secret: {e}")
+        _slack_bot_token_cache = ""
+    return _slack_bot_token_cache
+
+
+def slack_lookup_user_id(email):
+    """Resolve a work email to a Slack member ID via users.lookupByEmail.
+
+    Returns the member ID (e.g. 'U0123ABCD') or None if there's no token, no match,
+    or the API errors — callers fall back to plain-text names.
+    """
+    email = (email or "").strip().lower()
+    if not email:
+        return None
+    if email in _slack_id_cache:
+        return _slack_id_cache[email]
+    token = get_slack_bot_token()
+    if not token:
+        return None
+    uid = None
+    try:
+        url = "https://slack.com/api/users.lookupByEmail?email=" + urllib.parse.quote(email)
+        req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
+        with urllib.request.urlopen(req, timeout=10) as r:
+            data = json.loads(r.read().decode())
+        if data.get("ok"):
+            uid = data.get("user", {}).get("id")
+        else:
+            logger.info(f"Slack lookup for {email}: {data.get('error')}")
+    except Exception as e:
+        logger.warning(f"Slack lookup failed for {email}: {e}")
+    _slack_id_cache[email] = uid
+    return uid
 
 # Bundled APN roster (parsed from the last CSV export committed to the repo). Used as a
 # seed/fallback until someone uploads a fresh CSV on the tab, after which the uploaded
@@ -244,13 +348,19 @@ def build_apn_network(roster, aws_holder_ids, aws_counts=None):
     # Subtotal the redacted ("Not Trackable") records by certification so we can see
     # what APN reports in that bucket even though the owners are masked.
     redacted_certs = roster.get("redacted_certs", [])
-    counts = defaultdict(int)
+    tier_map = {t: defaultdict(int) for t in AWS_REQS}
     for r in redacted_certs:
-        counts[classify_aws(r.get("name", ""))] += 1
-    redacted_breakdown = [
-        {"tier": t, "count": counts.get(t, 0)}
-        for t in AWS_REQS  # Foundational, Technical, Professional/Specialty — same 3 groupings
-    ]
+        t = classify_aws(r.get("name", ""))
+        if t in tier_map:
+            tier_map[t][r.get("name", "")] += 1
+    # Nested breakdown: each tier group, with its individual certifications under it.
+    redacted_breakdown = []
+    for t in AWS_REQS:  # Foundational, Technical, Professional/Specialty
+        certs = [
+            {"name": name, "count": cnt}
+            for name, cnt in sorted(tier_map[t].items(), key=lambda x: (-x[1], x[0]))
+        ]
+        redacted_breakdown.append({"tier": t, "count": sum(c["count"] for c in certs), "certs": certs})
     # APN-side tier totals as distinct NAMED individuals (same tier logic as the Credly
     # side), for the Credly-vs-APN comparison. Redacted records can't be attributed to a
     # person, so they're excluded here (a lower bound on AWS's true count).
@@ -323,12 +433,16 @@ def handle_roster_upload(event):
 def handle_compliance(event, context=None):
     table = dynamodb.Table(CERTS_TABLE)
     items = table.scan().get("Items", [])
-    # employee_ids that hold at least one AWS cert on Credly (used to scope the
-    # "In App, Not on APN" list to AWS-cert holders only).
+    # employee_ids that hold at least one *active* AWS cert on Credly (used to scope
+    # the "On Credly, Not on APN" list). Active-only on purpose: someone whose AWS
+    # certs are all expired has nothing to share toward the partner tier, so they
+    # shouldn't be flagged or notified. This also drops rows mis-attributed via a
+    # wrong/shared credly_username, which were showing up with no active-cert count.
     aws_holder_ids = {
         it.get("employee_id", "") for it in items
         if "AWS Certified" in it.get("certification_name", "")
         and is_real_cert(it.get("certification_name", ""))
+        and is_active(it)
     }
     aws_grouped = {"Foundational": [], "Technical": [], "Professional/Specialty": []}
     claude_grouped = {"CCAR-F": [], "CCAR-P": [], "CCDV-F": [], "CCAO-F": []}
@@ -535,9 +649,75 @@ def handle_trigger_sync(event):
     return _resp(202, {"ok": True, "message": "Sync started — badges refresh in ~1-2 minutes."})
 
 
+def _email_for(acct):
+    """Best-effort work email for a Credly account: a stored email if present, else
+    derived as employee_id@EMAIL_DOMAIN (employee_id is first.last)."""
+    if not acct:
+        return ""
+    email = (acct.get("email") or "").strip()
+    if email:
+        return email
+    eid = (acct.get("employee_id") or "").strip()
+    return f"{eid}@{EMAIL_DOMAIN}" if eid else ""
+
+
+def post_apn_gap_digest(dry_run=False):
+    """Weekly digest: the 'AWS cert on Credly but not on APN' list, @-tagging each person.
+
+    Reuses handle_compliance so the list matches the dashboard exactly, and resolves each
+    person's Slack member ID via users.lookupByEmail (email derived from employee_id).
+    Skips entirely when nobody is in the gap. dry_run=True composes the message (tags and
+    all) and RETURNS it without posting — preview without pinging anyone.
+    """
+    data = json.loads(handle_compliance({})["body"])
+    gap = data.get("apn_network", {}).get("credly_only", [])
+    if not gap:
+        logger.info("APN gap digest: nobody in the gap — skipping Slack post.")
+        return _resp(200, {"posted": False, "count": 0, "message": ""})
+    # credly_username -> account (has employee_id/email). Server-side only; email is never
+    # sent to the browser. Used to derive the lookup email for Slack tagging.
+    acct_by_user = {a["credly_username"]: a for a in get_credly_accounts() if a.get("credly_username")}
+    lines, tagged, unresolved = [], 0, []
+    for p in gap:
+        acct = acct_by_user.get(p.get("credly_username", ""))
+        uid = slack_lookup_user_id(_email_for(acct))
+        if uid:
+            name_part = f"<@{uid}>"
+            tagged += 1
+        else:
+            # Fall back to plain name (+ Credly handle to help identify who we couldn't tag).
+            name_part = f"*{p['name']}*"
+            if p.get("credly_username"):
+                name_part += f" (Credly: {p['credly_username']})"
+            unresolved.append(p.get("name", ""))
+        line = f"• {name_part}"
+        if p.get("aws_cert_count"):
+            line += f" — {p['aws_cert_count']} AWS cert(s)"
+        lines.append(line)
+    header = (
+        f":warning: *{len(gap)} teammate(s)* hold an active AWS certification on Credly that we "
+        "*can't confirm* is being credited to Clearscale's AWS Partner tier. AWS's export only "
+        "lists people who've enabled cert sharing; everyone else appears as a redacted "
+        "“XXXXXXX” record we can't match, or doesn't appear at all, so from our side we can't "
+        "tell whether you're already counted:\n"
+    )
+    message = header + "\n" + "\n".join(lines) + "\n\n" + GAP_INSTRUCTIONS
+    if dry_run:
+        logger.info(f"APN gap digest DRY RUN: {len(gap)} people, {tagged} tagged, {len(unresolved)} unresolved (not posted)")
+        return _resp(200, {"posted": False, "dry_run": True, "count": len(gap),
+                           "tagged": tagged, "unresolved": unresolved, "message": message})
+    posted = post_slack(message)
+    logger.info(f"APN gap digest: {len(gap)} people, {tagged} tagged, posted={posted}")
+    return _resp(200, {"posted": posted, "count": len(gap), "tagged": tagged, "unresolved": unresolved})
+
+
 def lambda_handler(event, context):
     """Router. Uses the API Gateway resource path + method to dispatch. Falls back
     to the compliance payload for GET /compliance (the original behaviour)."""
+    # Scheduled EventBridge trigger (no HTTP method) → weekly Slack digest.
+    # Pass {"task":"apn_slack_digest","dry_run":true} to preview without posting/pinging.
+    if event.get("task") == "apn_slack_digest":
+        return post_apn_gap_digest(dry_run=bool(event.get("dry_run")))
     method = (event.get("httpMethod") or "").upper()
     resource = event.get("resource") or event.get("path") or ""
     if method == "OPTIONS":
