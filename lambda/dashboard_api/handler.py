@@ -22,6 +22,8 @@ lambda_client = boto3.client("lambda")
 secrets = boto3.client("secretsmanager")
 SLACK_WEBHOOK_SECRET = os.environ.get("SLACK_WEBHOOK_SECRET", "")
 SLACK_BOT_TOKEN_SECRET = os.environ.get("SLACK_BOT_TOKEN_SECRET", "")
+# Optional second webhook for the Anthropic channel's leaderboard.
+SLACK_ANTHROPIC_WEBHOOK_SECRET = os.environ.get("SLACK_ANTHROPIC_WEBHOOK_SECRET", "")
 # We don't store work emails, so derive one from employee_id (first.last) for the Slack
 # lookup: first.last@<EMAIL_DOMAIN>. A real stored email (if present) always wins.
 EMAIL_DOMAIN = os.environ.get("EMAIL_DOMAIN", "clearscale.com")
@@ -46,26 +48,27 @@ GAP_INSTRUCTIONS = (
     "you hold an active AWS cert and we can't confirm it's shared with Clearscale._"
 )
 
-_slack_webhook_cache = None
+_webhook_cache = {}
 
 
-def get_slack_webhook():
-    """Fetch the Slack incoming-webhook URL from Secrets Manager (cached per container)."""
-    global _slack_webhook_cache
-    if _slack_webhook_cache is not None:
-        return _slack_webhook_cache
-    if not SLACK_WEBHOOK_SECRET:
+def get_webhook(secret_name):
+    """Fetch an incoming-webhook URL from Secrets Manager, cached per secret name."""
+    if not secret_name:
         return ""
+    if secret_name in _webhook_cache:
+        return _webhook_cache[secret_name]
     try:
-        _slack_webhook_cache = secrets.get_secret_value(SecretId=SLACK_WEBHOOK_SECRET)["SecretString"].strip()
+        val = secrets.get_secret_value(SecretId=secret_name)["SecretString"].strip()
     except Exception as e:
-        logger.error(f"Could not read Slack webhook secret: {e}")
-        _slack_webhook_cache = ""
-    return _slack_webhook_cache
+        logger.error(f"Could not read webhook secret {secret_name}: {e}")
+        val = ""
+    _webhook_cache[secret_name] = val
+    return val
 
 
-def post_slack(text):
-    url = get_slack_webhook()
+def post_slack(text, webhook_secret=None):
+    """Post to Slack via an incoming webhook (default channel unless webhook_secret given)."""
+    url = get_webhook(webhook_secret or SLACK_WEBHOOK_SECRET)
     if not url:
         logger.warning("No Slack webhook configured; skipping post.")
         return False
@@ -711,6 +714,74 @@ def post_apn_gap_digest(dry_run=False):
     return _resp(200, {"posted": posted, "count": len(gap), "tagged": tagged, "unresolved": unresolved})
 
 
+def _title(eid):
+    """employee_id (first.last) -> 'First Last' for display."""
+    return " ".join(w.capitalize() for w in (eid or "").replace(".", " ").replace("-", " ").split()) or (eid or "")
+
+
+# kind -> (leaderboard key, title, unit label)
+LEADERBOARD_META = {
+    "aws": ("aws", "AWS Certification Leaderboard", "AWS certs"),
+    "claude": ("claude", "Anthropic Certification Leaderboard", "Anthropic certs"),
+}
+
+
+def post_leaderboard(kind="aws", dry_run=False, webhook_secret=None):
+    """Monthly certification leaderboard — a monospace bar chart, NO @-pings.
+
+    Uses the same dense-ranked leaderboard the dashboard shows (kind = 'aws' or 'claude').
+    Large rank groups (the long tail on 1 cert) collapse to one line. dry_run returns the
+    message without posting; webhook_secret picks the destination channel.
+    """
+    key, title, unit = LEADERBOARD_META.get(kind, LEADERBOARD_META["aws"])
+    data = json.loads(handle_compliance({})["body"])
+    lb = data.get("leaderboard", {}).get(key, [])
+    if not lb:
+        logger.info(f"Leaderboard[{kind}]: nobody certified — skipping.")
+        return _resp(200, {"posted": False, "count": 0, "message": ""})
+    MEDALS = {1: "🥇", 2: "🥈", 3: "🥉"}
+    COLLAPSE_OVER = 5   # groups bigger than this collapse to one summary line
+    BAR_CAP = 12
+    # Group consecutive entries by rank (already sorted by rank ascending).
+    groups = []
+    for e in lb:
+        if groups and groups[-1][0] == e["rank"]:
+            groups[-1][1].append(e)
+        else:
+            groups.append((e["rank"], [e]))
+    # Collapse only the deep tail (rank 4+); medal ranks (1-3) always show every name.
+    def collapsed(rank, members):
+        return rank > 3 and len(members) > COLLAPSE_OVER
+    indiv = [_title(m["employee"]) for r, members in groups if not collapsed(r, members) for m in members]
+    w = min(max((len(n) for n in indiv), default=10), 22)
+    lines = []
+    for rank, members in groups:
+        if collapsed(rank, members):
+            c = members[0]["count"]
+            lines.append(f"{rank:>2}  …and {len(members)} teammates with {c} cert{'s' if c != 1 else ''} each")
+        else:
+            for m in members:
+                c = m["count"]
+                bar = ("█" * min(c, BAR_CAP)).ljust(BAR_CAP)
+                medal = f"  {MEDALS[rank]}" if rank in MEDALS else ""
+                lines.append(f"{rank:>2}  {_title(m['employee']).ljust(w)}  {bar}  {c}{medal}")
+    total_certs = sum(e["count"] for e in lb)
+    people = len(lb)
+    rule = "─" * 50
+    body = (
+        f"🏆 {title} — Team Clearscale\n"
+        f"{rule}\n" + "\n".join(lines) + f"\n{rule}\n"
+        f"{total_certs} active {unit} · {people} certified teammates 🎖"
+    )
+    message = "```\n" + body + "\n```"
+    if dry_run:
+        logger.info(f"Leaderboard[{kind}] DRY RUN: {people} people (not posted)")
+        return _resp(200, {"posted": False, "dry_run": True, "people": people, "message": message})
+    posted = post_slack(message, webhook_secret=webhook_secret)
+    logger.info(f"Leaderboard[{kind}]: {people} people, posted={posted}")
+    return _resp(200, {"posted": posted, "people": people})
+
+
 def lambda_handler(event, context):
     """Router. Uses the API Gateway resource path + method to dispatch. Falls back
     to the compliance payload for GET /compliance (the original behaviour)."""
@@ -718,6 +789,13 @@ def lambda_handler(event, context):
     # Pass {"task":"apn_slack_digest","dry_run":true} to preview without posting/pinging.
     if event.get("task") == "apn_slack_digest":
         return post_apn_gap_digest(dry_run=bool(event.get("dry_run")))
+    # {"task":"aws_leaderboard","dry_run":true} to preview the monthly leaderboard.
+    if event.get("task") == "aws_leaderboard":
+        return post_leaderboard("aws", dry_run=bool(event.get("dry_run")))
+    # {"task":"anthropic_leaderboard","dry_run":true} — posts to the Anthropic channel.
+    if event.get("task") == "anthropic_leaderboard":
+        return post_leaderboard("claude", dry_run=bool(event.get("dry_run")),
+                                webhook_secret=SLACK_ANTHROPIC_WEBHOOK_SECRET)
     method = (event.get("httpMethod") or "").upper()
     resource = event.get("resource") or event.get("path") or ""
     if method == "OPTIONS":
