@@ -16,7 +16,8 @@ class DashboardRestApiConstruct(Construct):
     def __init__(self, scope, id, certs_table, users_table, allowed_origin, user_pool=None,
                  badge_sync_fn=None, admin_emails="",
                  slack_webhook_secret_name="credly-cert-tracker/slack-webhook-url",
-                 slack_bot_token_secret_name="credly-cert-tracker/slack-bot-token", **kwargs):
+                 slack_bot_token_secret_name="credly-cert-tracker/slack-bot-token",
+                 slack_anthropic_webhook_secret_name="credly-cert-tracker/slack-anthropic-webhook-url", **kwargs):
         super().__init__(scope, id, **kwargs)
 
         # Private bucket holding the uploaded APN roster (parsed CSV → JSON). The
@@ -59,6 +60,8 @@ class DashboardRestApiConstruct(Construct):
                 # Slack bot token (xoxb-…) with users:lookupByEmail, used to resolve each
                 # listed person's email → Slack member ID so the digest @-tags them.
                 "SLACK_BOT_TOKEN_SECRET": slack_bot_token_secret_name,
+                # Second webhook for the Anthropic channel's monthly leaderboard.
+                "SLACK_ANTHROPIC_WEBHOOK_SECRET": slack_anthropic_webhook_secret_name,
             },
             timeout=Duration.seconds(30),
             memory_size=256,
@@ -123,6 +126,11 @@ class DashboardRestApiConstruct(Construct):
             self, "SlackBotTokenSecret", slack_bot_token_secret_name
         )
         slack_bot_secret.grant_read(api_handler)
+        # Anthropic-channel webhook (created out-of-band once the app is added to that channel).
+        slack_anthropic_secret = secretsmanager.Secret.from_secret_name_v2(
+            self, "SlackAnthropicWebhookSecret", slack_anthropic_webhook_secret_name
+        )
+        slack_anthropic_secret.grant_read(api_handler)
         # Weekly Slack digest — EventBridge Scheduler with a timezone so it fires at a true
         # 9:00 AM US Eastern every Monday (handles EST/EDT automatically, which a plain UTC
         # cron can't). Set state to "DISABLED" to pause without deleting.
@@ -142,6 +150,34 @@ class DashboardRestApiConstruct(Construct):
                 arn=api_handler.function_arn,
                 role_arn=digest_scheduler_role.role_arn,
                 input=json.dumps({"task": "apn_slack_digest"}),
+            ),
+        )
+        # Monthly AWS cert leaderboard — 9:00 AM ET on the 1st of each month (no pings).
+        scheduler.CfnSchedule(
+            self, "AwsLeaderboardMonthly",
+            name="credly-aws-leaderboard-monthly",
+            flexible_time_window=scheduler.CfnSchedule.FlexibleTimeWindowProperty(mode="OFF"),
+            schedule_expression="cron(0 9 1 * ? *)",
+            schedule_expression_timezone="America/New_York",
+            state="ENABLED",
+            target=scheduler.CfnSchedule.TargetProperty(
+                arn=api_handler.function_arn,
+                role_arn=digest_scheduler_role.role_arn,
+                input=json.dumps({"task": "aws_leaderboard"}),
+            ),
+        )
+        # Monthly Anthropic cert leaderboard → #anthropic_claude_certified (its own webhook).
+        scheduler.CfnSchedule(
+            self, "AnthropicLeaderboardMonthly",
+            name="credly-anthropic-leaderboard-monthly",
+            flexible_time_window=scheduler.CfnSchedule.FlexibleTimeWindowProperty(mode="OFF"),
+            schedule_expression="cron(0 9 1 * ? *)",
+            schedule_expression_timezone="America/New_York",
+            state="ENABLED",
+            target=scheduler.CfnSchedule.TargetProperty(
+                arn=api_handler.function_arn,
+                role_arn=digest_scheduler_role.role_arn,
+                input=json.dumps({"task": "anthropic_leaderboard"}),
             ),
         )
 
