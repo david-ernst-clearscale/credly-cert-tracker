@@ -30,10 +30,11 @@ class FakeS3Client:
 
 class FakeDynamoTable:
     def __init__(self):
+        self.items = []
         self.update_calls = []
 
     def scan(self, **kwargs):
-        return {"Items": []}
+        return {"Items": self.items}
 
     def update_item(self, **kwargs):
         self.update_calls.append(kwargs)
@@ -206,6 +207,59 @@ class DashboardApiSecurityTests(unittest.TestCase):
         self.assertEqual(
             {":c": "jane.doe_aws-1"},
             users_table.update_calls[0]["ExpressionAttributeValues"],
+        )
+
+    def test_is_active_rejects_bad_expiry_and_malformed_dates(self):
+        self.assertFalse(
+            self.handler.is_active(
+                {"status": "bad_expiry", "expires_at": "2099-01-01T00:00:00+00:00"}
+            )
+        )
+        self.assertFalse(self.handler.is_active({"expires_at": "not-a-date"}))
+        self.assertTrue(self.handler.is_active({"expires_at": "no-expiry"}))
+        self.assertTrue(self.handler.is_active({"expires_at": ""}))
+
+    def test_compliance_exposes_bad_expiry_warnings_without_counting_them(self):
+        certs_table = self.handler.dynamodb.Table("certs")
+        certs_table.items = [
+            {
+                "employee_id": "jane.doe",
+                "certification_id": "cert-valid",
+                "certification_name": "AWS Certified Cloud Practitioner",
+                "expires_at": "2099-01-01T00:00:00+00:00",
+                "status": "active",
+            },
+            {
+                "employee_id": "john.smith",
+                "certification_id": "cert-bad",
+                "certification_name": "AWS Certified Solutions Architect - Associate",
+                "expires_at": "not-a-date",
+                "status": "bad_expiry",
+            },
+        ]
+
+        response = self.handler.handle_compliance({})
+
+        self.assertEqual(200, response["statusCode"])
+        body = json.loads(response["body"])
+        self.assertEqual(
+            [
+                {
+                    "name": "AWS Certified Solutions Architect - Associate",
+                    "employee": "john.smith",
+                    "expires_at": "not-a-date",
+                    "status": "bad_expiry",
+                }
+            ],
+            body["expiry_warnings"],
+        )
+        self.assertEqual(1, body["aws_tiers"]["Foundational"]["current"])
+        self.assertEqual(1, body["aws_tiers"]["Foundational"]["cert_count"])
+        self.assertEqual([], body["aws_tiers"]["Technical"]["certifications"])
+        self.assertEqual(0, body["aws_tiers"]["Technical"]["current"])
+        self.assertEqual(
+            [{"employee": "jane.doe", "count": 1, "rank": 1}],
+            body["leaderboard"]["aws"],
         )
 
 

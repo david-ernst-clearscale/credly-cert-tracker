@@ -91,7 +91,7 @@ class ExpirationCheckerParsingTests(unittest.TestCase):
         )
         self.certs_table = self.fake_boto3.dynamodb.tables["certs"]
 
-    def test_lambda_skips_no_expiry_and_malformed_values_without_crashing(self):
+    def test_lambda_updates_malformed_expiry_to_bad_expiry_without_crashing(self):
         self.certs_table.items = [
             {
                 "employee_id": "emp-1",
@@ -110,9 +110,24 @@ class ExpirationCheckerParsingTests(unittest.TestCase):
         with self.assertLogs(level="WARNING") as logs:
             result = self.handler.lambda_handler({}, None)
 
-        self.assertEqual({"updated": 0, "total": 2}, result)
-        self.assertEqual([], self.certs_table.update_calls)
-        self.assertIn("Skipping invalid expiration date: not-a-date", logs.output[0])
+        self.assertEqual({"updated": 1, "total": 2}, result)
+        self.assertEqual(1, len(self.certs_table.update_calls))
+        self.assertEqual(
+            {"employee_id": "emp-2", "certification_id": "cert-2"},
+            self.certs_table.update_calls[0]["Key"],
+        )
+        self.assertEqual(
+            {
+                ":s": "bad_expiry",
+                ":ts": self.certs_table.update_calls[0]["ExpressionAttributeValues"][
+                    ":ts"
+                ],
+            },
+            self.certs_table.update_calls[0]["ExpressionAttributeValues"],
+        )
+        self.assertIn(
+            "Flagging invalid expiration date as bad_expiry: not-a-date", logs.output[0]
+        )
 
     def test_compute_status_keeps_existing_thresholds_for_valid_dates(self):
         now = datetime.now(timezone.utc)
@@ -152,12 +167,16 @@ class BadgeSyncParsingTests(unittest.TestCase):
             },
         )
 
-    def test_compute_status_treats_no_expiry_and_malformed_values_as_active(self):
+    def test_compute_status_treats_missing_and_no_expiry_as_active_but_flags_malformed(
+        self,
+    ):
+        self.assertEqual("active", self.handler.compute_status(None))
+        self.assertEqual("active", self.handler.compute_status(""))
         self.assertEqual("active", self.handler.compute_status("no-expiry"))
         with self.assertLogs(level="WARNING") as logs:
-            self.assertEqual("active", self.handler.compute_status("not-a-date"))
+            self.assertEqual("bad_expiry", self.handler.compute_status("not-a-date"))
         self.assertIn(
-            "Treating invalid expiration date as active: not-a-date", logs.output[0]
+            "Flagging invalid expiration date as bad_expiry: not-a-date", logs.output[0]
         )
 
     def test_create_reminder_schedules_skips_invalid_expiry_when_scheduler_enabled(
