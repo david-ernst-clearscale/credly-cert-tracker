@@ -164,12 +164,20 @@ def is_aws_badge(badge: dict) -> bool:
         return True
     return False
 
+
 def compute_status(expires_at: str | None) -> str:
     """Compute certification status based on expiration date."""
-    if not expires_at:
+    if not expires_at or expires_at == "no-expiry":
         return "active"
 
-    expiry = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+    try:
+        expiry = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+    except ValueError:
+        logger.warning(f"Treating invalid expiration date as active: {expires_at}")
+        return "active"
+
+    if expiry.tzinfo is None:
+        expiry = expiry.replace(tzinfo=timezone.utc)
     now = datetime.now(timezone.utc)
     days_until = (expiry - now).days
 
@@ -208,12 +216,26 @@ def get_existing_cert(employee_id: str, cert_id: str) -> dict | None:
         return None
 
 
-def create_reminder_schedules(employee_id: str, cert_id: str, cert_name: str, expires_at: str):
+def create_reminder_schedules(
+    employee_id: str, cert_id: str, cert_name: str, expires_at: str
+):
     """Create EventBridge one-time schedules for expiry reminders."""
     if not SCHEDULER_ROLE_ARN:
         logger.info("Skipping scheduler - no SCHEDULER_ROLE_ARN configured")
         return
-    expiry = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+    if expires_at == "no-expiry":
+        logger.warning("Skipping reminder schedules for non-expiring certification")
+        return
+    try:
+        expiry = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+    except ValueError:
+        logger.warning(
+            f"Skipping reminder schedules for invalid expiration date: {expires_at}"
+        )
+        return
+
+    if expiry.tzinfo is None:
+        expiry = expiry.replace(tzinfo=timezone.utc)
 
     for days in REMINDER_DAYS:
         reminder_date = expiry - timedelta(days=days)
@@ -231,14 +253,16 @@ def create_reminder_schedules(employee_id: str, cert_id: str, cert_name: str, ex
                 Target={
                     "Arn": os.environ["NOTIFICATION_LAMBDA_ARN"],
                     "RoleArn": os.environ["SCHEDULER_ROLE_ARN"],
-                    "Input": json.dumps({
-                        "type": "expiry_reminder",
-                        "employee_id": employee_id,
-                        "certification_id": cert_id,
-                        "certification_name": cert_name,
-                        "expires_at": expires_at or "no-expiry",
-                        "days_remaining": days,
-                    }),
+                    "Input": json.dumps(
+                        {
+                            "type": "expiry_reminder",
+                            "employee_id": employee_id,
+                            "certification_id": cert_id,
+                            "certification_name": cert_name,
+                            "expires_at": expires_at or "no-expiry",
+                            "days_remaining": days,
+                        }
+                    ),
                 },
                 ActionAfterCompletion="DELETE",
             )
