@@ -336,6 +336,49 @@ class DashboardApiSecurityTests(unittest.TestCase):
             body["leaderboard"]["aws"],
         )
 
+    def test_scheduled_digest_and_leaderboard_reuse_compliance_without_rescanning_certs(
+        self,
+    ):
+        self.handler.BUNDLED_ROSTER = {
+            "people": [],
+            "redacted_count": 0,
+            "redacted_certs": [],
+        }
+        self.handler.slack_lookup_user_id = lambda email: "U123" if email else None
+        certs_table = self.handler.dynamodb.Table("certs")
+        users_table = self.handler.dynamodb.Table("users")
+        users_table.items = [
+            {
+                "employee_id": "jane.doe",
+                "credly_username": "jane_doe",
+                "name": "Jane Doe",
+                "email": "jane.doe@example.com",
+            }
+        ]
+        certs_table.items = [
+            {
+                "employee_id": "jane.doe",
+                "certification_id": "cert-aws-1",
+                "certification_name": "AWS Certified Cloud Practitioner",
+                "expires_at": "2099-01-01T00:00:00+00:00",
+                "status": "active",
+            }
+        ]
+        compliance_response = self.handler.handle_compliance({})
+        compliance_data = json.loads(compliance_response["body"])
+        self.assertEqual(1, len(certs_table.scan_calls))
+
+        digest_response = self.handler.post_apn_gap_digest(
+            dry_run=True, compliance_data=compliance_data
+        )
+        leaderboard_response = self.handler.post_leaderboard(
+            "aws", dry_run=True, compliance_data=compliance_data
+        )
+
+        self.assertEqual(200, digest_response["statusCode"])
+        self.assertEqual(200, leaderboard_response["statusCode"])
+        self.assertEqual(1, len(certs_table.scan_calls))
+
 
 if __name__ == "__main__":
     unittest.main()

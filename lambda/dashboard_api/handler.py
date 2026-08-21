@@ -873,7 +873,7 @@ def _email_for(acct):
     return f"{eid}@{EMAIL_DOMAIN}" if eid else ""
 
 
-def post_apn_gap_digest(dry_run=False):
+def post_apn_gap_digest(dry_run=False, compliance_data=None):
     """Weekly digest: the 'AWS cert on Credly but not on APN' list, @-tagging each person.
 
     Reuses handle_compliance so the list matches the dashboard exactly, and resolves each
@@ -881,7 +881,11 @@ def post_apn_gap_digest(dry_run=False):
     Skips entirely when nobody is in the gap. dry_run=True composes the message (tags and
     all) and RETURNS it without posting — preview without pinging anyone.
     """
-    data = json.loads(handle_compliance({})["body"])
+    data = (
+        compliance_data
+        if compliance_data is not None
+        else json.loads(handle_compliance({})["body"])
+    )
     gap = data.get("apn_network", {}).get("credly_only", [])
     if not gap:
         logger.info("APN gap digest: nobody in the gap — skipping Slack post.")
@@ -960,7 +964,9 @@ LEADERBOARD_META = {
 }
 
 
-def post_leaderboard(kind="aws", dry_run=False, webhook_secret=None):
+def post_leaderboard(
+    kind="aws", dry_run=False, webhook_secret=None, compliance_data=None
+):
     """Monthly certification leaderboard — a monospace bar chart, NO @-pings.
 
     Uses the same dense-ranked leaderboard the dashboard shows (kind = 'aws' or 'claude').
@@ -968,7 +974,11 @@ def post_leaderboard(kind="aws", dry_run=False, webhook_secret=None):
     message without posting; webhook_secret picks the destination channel.
     """
     key, title, unit = LEADERBOARD_META.get(kind, LEADERBOARD_META["aws"])
-    data = json.loads(handle_compliance({})["body"])
+    data = (
+        compliance_data
+        if compliance_data is not None
+        else json.loads(handle_compliance({})["body"])
+    )
     lb = data.get("leaderboard", {}).get(key, [])
     if not lb:
         logger.info(f"Leaderboard[{kind}]: nobody certified — skipping.")
