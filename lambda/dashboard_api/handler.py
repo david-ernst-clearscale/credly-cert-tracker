@@ -453,6 +453,8 @@ def _resp(status, body):
 
 def handle_roster_upload(event):
     """POST /apn-roster — parse an uploaded CSV, store it in S3, return a summary."""
+    if not _is_admin(event):
+        return _resp(403, {"error": "You don't have permission to upload APN rosters."})
     if not ROSTER_BUCKET:
         return _resp(
             500, {"error": "Roster storage is not configured (ROSTER_BUCKET unset)."}
