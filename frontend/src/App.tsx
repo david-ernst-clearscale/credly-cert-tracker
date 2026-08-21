@@ -1,23 +1,20 @@
 import { useState, useEffect } from 'react';
 import Dashboard from './pages/Dashboard';
+import { parseDashboardToken, type DashboardTokenPayload } from './authToken';
 
 const COGNITO_DOMAIN = import.meta.env.VITE_COGNITO_DOMAIN;
 const CLIENT_ID = import.meta.env.VITE_USER_POOL_CLIENT_ID;
 const REDIRECT_URI = window.location.origin;
 
-function decodeJwt(token: string): Record<string, unknown> {
-  const seg = token.split('.').at(1)!;
-  
-  const base64 = seg.replace(/-/g, '+').replace(/_/g, '/');
-  const padded = base64 + '='.repeat((4 - base64.length % 4) % 4);
-  return JSON.parse(atob(padded));
-}
+function storeSession(idToken: string, refreshToken?: string): DashboardTokenPayload | null {
+  const payload = parseDashboardToken(idToken);
+  if (!payload) return null;
 
-function storeSession(idToken: string, email: string, expiresIn: number, refreshToken?: string) {
   localStorage.setItem('cert_token', idToken);
-  localStorage.setItem('cert_email', email);
-  localStorage.setItem('cert_token_expires_at', String(Date.now() + expiresIn * 1000));
+  localStorage.setItem('cert_email', payload.email);
+  localStorage.setItem('cert_token_expires_at', String(payload.expiresAt));
   if (refreshToken) localStorage.setItem('cert_refresh_token', refreshToken);
+  return payload;
 }
 
 function clearSession() {
@@ -91,35 +88,41 @@ function App() {
         .then(r => r.json())
         .then(data => {
           if (data.id_token) {
-            const payload = decodeJwt(data.id_token);
-            const email = (payload.email as string) || '';
-            storeSession(data.id_token, email, data.expires_in ?? 3600, data.refresh_token);
-            setUser({ email, token: data.id_token });
+            const payload = storeSession(data.id_token, data.refresh_token);
+            if (payload) {
+              setUser({ email: payload.email, token: data.id_token });
+            } else {
+              clearSession();
+            }
           }
           setLoading(false);
         })
         .catch(() => setLoading(false));
     } else {
       const token = localStorage.getItem('cert_token');
-      const email = localStorage.getItem('cert_email');
-      const expiresAt = Number(localStorage.getItem('cert_token_expires_at') || 0);
       const refreshToken = localStorage.getItem('cert_refresh_token');
 
-      if (!token || !email) {
+      if (!token) {
         setLoading(false);
         return;
       }
 
+      const payload = parseDashboardToken(token);
+
       // Refresh a little early (60s buffer) instead of waiting for the exact expiry
       // instant — avoids a near-miss where the token dies mid-request.
-      if (Date.now() < expiresAt - 60_000) {
-        setUser({ email, token });
+      if (payload && Date.now() < payload.expiresAt - 60_000) {
+        setUser({ email: payload.email, token });
         setLoading(false);
       } else if (refreshToken) {
         refreshAccessToken(refreshToken).then(result => {
           if (result) {
-            storeSession(result.id_token, email, result.expires_in, refreshToken);
-            setUser({ email, token: result.id_token });
+            const refreshedPayload = storeSession(result.id_token, refreshToken);
+            if (refreshedPayload) {
+              setUser({ email: refreshedPayload.email, token: result.id_token });
+            } else {
+              clearSession();
+            }
           } else {
             // Refresh token is dead too (revoked / past its own TTL) — back to sign-in.
             clearSession();
