@@ -143,6 +143,52 @@ class DashboardApiSecurityTests(unittest.TestCase):
         self.assertEqual(0, body["redacted_count"])
         self.assertEqual(1, len(self.s3.objects))
 
+    def test_upsert_user_rejects_path_like_credly_username(self):
+        response = self.handler.handle_upsert_user(
+            admin_event(
+                {"employee_id": "jane.doe", "credly_username": "jane/admin?debug=true"}
+            )
+        )
+
+        self.assertEqual(400, response["statusCode"])
+        body = json.loads(response["body"])
+        self.assertIn("credly_username", body["error"])
+
+    def test_upsert_user_rejects_path_like_employee_id(self):
+        response = self.handler.handle_upsert_user(
+            admin_event({"employee_id": "team/jane", "credly_username": "jane.doe"})
+        )
+
+        self.assertEqual(400, response["statusCode"])
+        body = json.loads(response["body"])
+        self.assertIn("employee_id", body["error"])
+
+    def test_upsert_user_accepts_and_normalizes_normal_values(self):
+        response = self.handler.handle_upsert_user(
+            admin_event(
+                {
+                    "employee_id": "  jane.doe@example.com  ",
+                    "credly_username": "  jane.doe_aws-1  ",
+                }
+            )
+        )
+
+        self.assertEqual(200, response["statusCode"])
+        body = json.loads(response["body"])
+        self.assertEqual("jane.doe@example.com", body["user"]["employee_id"])
+        self.assertEqual("jane.doe_aws-1", body["user"]["credly_username"])
+
+        users_table = self.handler.dynamodb.Table("users")
+        self.assertEqual(1, len(users_table.update_calls))
+        self.assertEqual(
+            {"employee_id": "jane.doe@example.com"},
+            users_table.update_calls[0]["Key"],
+        )
+        self.assertEqual(
+            {":c": "jane.doe_aws-1"},
+            users_table.update_calls[0]["ExpressionAttributeValues"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
