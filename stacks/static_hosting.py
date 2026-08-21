@@ -1,5 +1,8 @@
 from aws_cdk import (
-    Stack, Duration, RemovalPolicy, CfnOutput,
+    Stack,
+    Duration,
+    RemovalPolicy,
+    CfnOutput,
     aws_s3 as s3,
     aws_s3_deployment as s3_deploy,
     aws_cloudfront as cloudfront,
@@ -13,12 +16,19 @@ from constructs import Construct
 
 
 class StaticHostingConstruct(Construct):
-    def __init__(self, scope: Construct, id: str, *, build_path: str = "./frontend/dist",
-                 alert_email: str = ""):
+    def __init__(
+        self,
+        scope: Construct,
+        id: str,
+        *,
+        build_path: str = "./frontend/dist",
+        alert_email: str = "",
+    ):
         super().__init__(scope, id)
 
         self.bucket = s3.Bucket(
-            self, "DashboardBucket",
+            self,
+            "DashboardBucket",
             encryption=s3.BucketEncryption.S3_MANAGED,
             block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
             removal_policy=RemovalPolicy.DESTROY,
@@ -30,10 +40,12 @@ class StaticHostingConstruct(Construct):
         )
 
         self.distribution = cloudfront.Distribution(
-            self, "Distribution",
+            self,
+            "Distribution",
             default_behavior=cloudfront.BehaviorOptions(
                 origin=origins.S3BucketOrigin.with_origin_access_control(self.bucket),
                 viewer_protocol_policy=cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+                response_headers_policy=cloudfront.ResponseHeadersPolicy.SECURITY_HEADERS,
             ),
             default_root_object="index.html",
             error_responses=[
@@ -54,15 +66,19 @@ class StaticHostingConstruct(Construct):
         )
 
         s3_deploy.BucketDeployment(
-            self, "Deploy",
+            self,
+            "Deploy",
             sources=[s3_deploy.Source.asset(build_path)],
             destination_bucket=self.bucket,
             distribution=self.distribution,
             distribution_paths=["/*"],
         )
 
-        CfnOutput(self, "DashboardUrl",
-            value=f"https://{self.distribution.distribution_domain_name}")
+        CfnOutput(
+            self,
+            "DashboardUrl",
+            value=f"https://{self.distribution.distribution_domain_name}",
+        )
 
         # ─── Site-health alarms ───
         # This is the detection layer the original outage was missing: the bucket
@@ -70,7 +86,8 @@ class StaticHostingConstruct(Construct):
         # They publish to a dedicated topic (with a real email subscription) rather
         # than the expiration topic, whose only subscriber is a Lambda.
         self.alerts_topic = sns.Topic(
-            self, "SiteAlertsTopic",
+            self,
+            "SiteAlertsTopic",
             display_name="CertTracker-Site-Health",
         )
         if alert_email:
@@ -82,7 +99,8 @@ class StaticHostingConstruct(Construct):
         # (With the 403->index.html rewrite an empty bucket now returns 200, so a
         # CloudFront 4xx alarm would NOT catch this — object count is the true signal.)
         empty_bucket = cloudwatch.Alarm(
-            self, "BucketEmptyAlarm",
+            self,
+            "BucketEmptyAlarm",
             alarm_name="CertTracker-Hosting-BucketEmpty",
             metric=cloudwatch.Metric(
                 namespace="AWS/S3",
@@ -105,7 +123,8 @@ class StaticHostingConstruct(Construct):
         # Serving-error alarm — catches origin/serving failures the object-count
         # metric can't (e.g. broken OAC/bucket policy) and does so in ~10 min.
         serving_errors = cloudwatch.Alarm(
-            self, "Cf5xxAlarm",
+            self,
+            "Cf5xxAlarm",
             alarm_name="CertTracker-Hosting-5xx",
             metric=cloudwatch.Metric(
                 namespace="AWS/CloudFront",
