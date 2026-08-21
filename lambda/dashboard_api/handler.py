@@ -468,6 +468,15 @@ def _resp(status, body):
     return {"statusCode": status, "headers": _headers(), "body": json.dumps(body)}
 
 
+def _scan_all_items(table):
+    resp = table.scan()
+    items = resp.get("Items", [])
+    while "LastEvaluatedKey" in resp:
+        resp = table.scan(ExclusiveStartKey=resp["LastEvaluatedKey"])
+        items.extend(resp.get("Items", []))
+    return items
+
+
 def handle_roster_upload(event):
     """POST /apn-roster — parse an uploaded CSV, store it in S3, return a summary."""
     if not _is_admin(event):
@@ -530,7 +539,7 @@ def handle_roster_upload(event):
 
 def handle_compliance(event, context=None):
     table = dynamodb.Table(CERTS_TABLE)
-    items = table.scan().get("Items", [])
+    items = _scan_all_items(table)
     # employee_ids that hold at least one *active* AWS cert on Credly (used to scope
     # the "On Credly, Not on APN" list). Active-only on purpose: someone whose AWS
     # certs are all expired has nothing to share toward the partner tier, so they
