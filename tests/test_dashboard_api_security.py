@@ -1,0 +1,148 @@
+import base64
+import importlib.util
+import json
+import os
+import sys
+import types
+import unittest
+from pathlib import Path
+
+
+CSV_HEADER = "User name,User work email,Certification name,Certification level,Award date,Expiration date\n"
+CSV_ROW = "Jane Doe,jane.doe@example.com,AWS Certified Solutions Architect,Associate,2024-01-01,2027-01-01\n"
+
+
+class FakeS3Client:
+    class exceptions:
+        class NoSuchKey(Exception):
+            pass
+
+    def __init__(self):
+        self.objects = []
+
+    def put_object(self, **kwargs):
+        self.objects.append(kwargs)
+        return {}
+
+    def get_object(self, **kwargs):
+        raise self.exceptions.NoSuchKey()
+
+
+class FakeDynamoTable:
+    def __init__(self):
+        self.update_calls = []
+
+    def scan(self, **kwargs):
+        return {"Items": []}
+
+    def update_item(self, **kwargs):
+        self.update_calls.append(kwargs)
+        return {}
+
+
+class FakeDynamoResource:
+    def __init__(self):
+        self.tables = {}
+
+    def Table(self, name):
+        return self.tables.setdefault(name, FakeDynamoTable())
+
+
+class FakeBoto3(types.ModuleType):
+    def __init__(self):
+        super().__init__("boto3")
+        self.s3_client = FakeS3Client()
+        self.dynamodb = FakeDynamoResource()
+
+    def resource(self, name):
+        return self.dynamodb
+
+    def client(self, name):
+        if name == "s3":
+            return self.s3_client
+        return types.SimpleNamespace()
+
+
+def load_handler():
+    os.environ.update(
+        {
+            "CERTS_TABLE": "certs",
+            "USERS_TABLE": "users",
+            "ROSTER_BUCKET": "roster-bucket",
+            "ADMIN_EMAILS": "admin@example.com",
+        }
+    )
+    fake_boto3 = FakeBoto3()
+    sys.modules["boto3"] = fake_boto3
+    dynamodb_module = types.ModuleType("boto3.dynamodb")
+    conditions_module = types.ModuleType("boto3.dynamodb.conditions")
+    conditions_module.Key = lambda name: types.SimpleNamespace(
+        eq=lambda value: (name, value)
+    )
+    sys.modules["boto3.dynamodb"] = dynamodb_module
+    sys.modules["boto3.dynamodb.conditions"] = conditions_module
+
+    handler_path = (
+        Path(__file__).resolve().parents[1] / "lambda" / "dashboard_api" / "handler.py"
+    )
+    spec = importlib.util.spec_from_file_location(
+        "dashboard_api_handler_under_test", handler_path
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module, fake_boto3.s3_client
+
+
+def admin_event(body):
+    return {
+        "requestContext": {"authorizer": {"claims": {"email": "admin@example.com"}}},
+        "body": json.dumps(body),
+    }
+
+
+class DashboardApiSecurityTests(unittest.TestCase):
+    def setUp(self):
+        self.handler, self.s3 = load_handler()
+
+    def test_roster_upload_rejects_decoded_body_over_byte_limit(self):
+        oversized_csv = CSV_HEADER + ("x" * (10 * 1024 * 1024 + 1))
+        response = self.handler.handle_roster_upload({"body": oversized_csv})
+
+        self.assertEqual(413, response["statusCode"])
+        body = json.loads(response["body"])
+        self.assertIn("too large", body["error"].lower())
+        self.assertEqual([], self.s3.objects)
+
+    def test_roster_upload_rejects_base64_decoded_body_over_byte_limit(self):
+        oversized_bytes = (CSV_HEADER + ("x" * (10 * 1024 * 1024 + 1))).encode("utf-8")
+        response = self.handler.handle_roster_upload(
+            {
+                "body": base64.b64encode(oversized_bytes).decode("ascii"),
+                "isBase64Encoded": True,
+            }
+        )
+
+        self.assertEqual(413, response["statusCode"])
+        body = json.loads(response["body"])
+        self.assertIn("too large", body["error"].lower())
+        self.assertEqual([], self.s3.objects)
+
+    def test_parse_apn_csv_rejects_absurd_row_counts(self):
+        csv_text = CSV_HEADER + (CSV_ROW * 25001)
+
+        with self.assertRaisesRegex(ValueError, "25,000"):
+            self.handler.parse_apn_csv(csv_text)
+
+    def test_roster_upload_accepts_normal_small_csv(self):
+        response = self.handler.handle_roster_upload({"body": CSV_HEADER + CSV_ROW})
+
+        self.assertEqual(200, response["statusCode"])
+        body = json.loads(response["body"])
+        self.assertTrue(body["ok"])
+        self.assertEqual(1, body["named_people"])
+        self.assertEqual(0, body["redacted_count"])
+        self.assertEqual(1, len(self.s3.objects))
+
+
+if __name__ == "__main__":
+    unittest.main()

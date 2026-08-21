@@ -13,6 +13,8 @@ CERTS_TABLE = os.environ["CERTS_TABLE"]
 USERS_TABLE = os.environ["USERS_TABLE"]
 ROSTER_BUCKET = os.environ.get("ROSTER_BUCKET", "")
 ROSTER_KEY = "apn_roster.json"
+MAX_APN_CSV_BYTES = 10 * 1024 * 1024
+MAX_APN_CSV_ROWS = 25000
 
 # Comma-separated allowlist of emails permitted to add/edit users or trigger a sync.
 # Reads/list are open to any authenticated user; writes require membership here.
@@ -167,7 +169,9 @@ def parse_apn_csv(text):
             "CSV is missing required columns. Expected at least: "
             "'User name', 'User work email', 'Certification name'."
         )
-    for row in reader:
+    for row_number, row in enumerate(reader, start=1):
+        if row_number > MAX_APN_CSV_ROWS:
+            raise ValueError(f"APN CSV has more than {MAX_APN_CSV_ROWS:,} rows. Please upload a smaller export.")
         name = (row.get("User name") or "").strip()
         email = (row.get("User work email") or "").strip()
         cert = {
@@ -410,7 +414,12 @@ def handle_roster_upload(event):
         return _resp(500, {"error": "Roster storage is not configured (ROSTER_BUCKET unset)."})
     body = event.get("body") or ""
     if event.get("isBase64Encoded"):
-        body = base64.b64decode(body).decode("utf-8", errors="replace")
+        body_bytes = base64.b64decode(body)
+        if len(body_bytes) > MAX_APN_CSV_BYTES:
+            return _resp(413, {"error": "APN CSV upload is too large. Please upload a CSV no larger than 10 MB."})
+        body = body_bytes.decode("utf-8", errors="replace")
+    elif len(body.encode("utf-8")) > MAX_APN_CSV_BYTES:
+        return _resp(413, {"error": "APN CSV upload is too large. Please upload a CSV no larger than 10 MB."})
     if not body.strip():
         return _resp(400, {"error": "Empty upload — no CSV content received."})
     try:
