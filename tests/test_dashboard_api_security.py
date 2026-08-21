@@ -32,9 +32,14 @@ class FakeS3Client:
 class FakeDynamoTable:
     def __init__(self):
         self.items = []
+        self.scan_pages = None
+        self.scan_calls = []
         self.update_calls = []
 
     def scan(self, **kwargs):
+        self.scan_calls.append(kwargs)
+        if self.scan_pages is not None:
+            return self.scan_pages[len(self.scan_calls) - 1]
         return {"Items": self.items}
 
     def update_item(self, **kwargs):
@@ -282,6 +287,52 @@ class DashboardApiSecurityTests(unittest.TestCase):
         self.assertEqual(0, body["aws_tiers"]["Technical"]["current"])
         self.assertEqual(
             [{"employee": "jane.doe", "count": 1, "rank": 1}],
+            body["leaderboard"]["aws"],
+        )
+
+    def test_compliance_includes_certifications_from_all_scan_pages(self):
+        certs_table = self.handler.dynamodb.Table("certs")
+        certs_table.scan_pages = [
+            {
+                "Items": [
+                    {
+                        "employee_id": "jane.doe",
+                        "certification_id": "cert-page-1",
+                        "certification_name": "AWS Certified Cloud Practitioner",
+                        "expires_at": "2099-01-01T00:00:00+00:00",
+                        "status": "active",
+                    }
+                ],
+                "LastEvaluatedKey": {"employee_id": "jane.doe"},
+            },
+            {
+                "Items": [
+                    {
+                        "employee_id": "john.smith",
+                        "certification_id": "cert-page-2",
+                        "certification_name": "AWS Certified Cloud Practitioner",
+                        "expires_at": "2099-01-01T00:00:00+00:00",
+                        "status": "active",
+                    }
+                ]
+            },
+        ]
+
+        response = self.handler.handle_compliance({})
+
+        self.assertEqual(200, response["statusCode"])
+        body = json.loads(response["body"])
+        self.assertEqual(
+            [{}, {"ExclusiveStartKey": {"employee_id": "jane.doe"}}],
+            certs_table.scan_calls,
+        )
+        self.assertEqual(2, body["aws_tiers"]["Foundational"]["current"])
+        self.assertEqual(2, body["aws_tiers"]["Foundational"]["cert_count"])
+        self.assertEqual(
+            [
+                {"employee": "jane.doe", "count": 1, "rank": 1},
+                {"employee": "john.smith", "count": 1, "rank": 1},
+            ],
             body["leaderboard"]["aws"],
         )
 
