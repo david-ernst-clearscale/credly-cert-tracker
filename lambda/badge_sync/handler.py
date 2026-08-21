@@ -173,8 +173,8 @@ def compute_status(expires_at: str | None) -> str:
     try:
         expiry = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
     except ValueError:
-        logger.warning(f"Treating invalid expiration date as active: {expires_at}")
-        return "active"
+        logger.warning(f"Flagging invalid expiration date as bad_expiry: {expires_at}")
+        return "bad_expiry"
 
     if expiry.tzinfo is None:
         expiry = expiry.replace(tzinfo=timezone.utc)

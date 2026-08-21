@@ -20,7 +20,7 @@ def parse_expiration(expires_at: str | None) -> datetime | None:
     try:
         expiry = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
     except ValueError:
-        logger.warning(f"Skipping invalid expiration date: {expires_at}")
+        logger.warning(f"Flagging invalid expiration date as bad_expiry: {expires_at}")
         return None
 
     if expiry.tzinfo is None:
@@ -30,9 +30,12 @@ def parse_expiration(expires_at: str | None) -> datetime | None:
 
 def compute_status(expires_at: str | None) -> str | None:
     """Compute certification status, or None when no status update should run."""
+    if not expires_at or expires_at == "no-expiry":
+        return None
+
     expiry = parse_expiration(expires_at)
     if expiry is None:
-        return None
+        return "bad_expiry"
 
     now = datetime.now(timezone.utc)
     days_until = (expiry - now).days

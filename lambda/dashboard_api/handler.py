@@ -258,6 +258,9 @@ def classify_claude(name):
 
 
 def is_active(item):
+    if item.get("status") == "bad_expiry":
+        return False
+
     expires = item.get("expires_at", "")
     if not expires or expires == "no-expiry":
         return True
@@ -267,6 +270,20 @@ def is_active(item):
         if exp_date.tzinfo is None:
             exp_date = exp_date.replace(tzinfo=timezone.utc)
         return exp_date > now
+    except (ValueError, TypeError):
+        return False
+
+
+def is_bad_expiry(item):
+    if item.get("status") == "bad_expiry":
+        return True
+
+    expires = item.get("expires_at", "")
+    if not expires or expires == "no-expiry":
+        return False
+    try:
+        datetime.fromisoformat(expires.replace("Z", "+00:00"))
+        return False
     except (ValueError, TypeError):
         return True
 
@@ -558,11 +575,21 @@ def handle_compliance(event, context=None):
         return (1, exp)  # real expiry — later ISO string sorts higher
 
     best = {}
+    expiry_warnings = []
     for item in items:
-        if not is_active(item):
-            continue
         name = item.get("certification_name", "")
         employee = item.get("employee_id", "")
+        if is_bad_expiry(item):
+            expiry_warnings.append(
+                {
+                    "name": name,
+                    "employee": employee,
+                    "expires_at": item.get("expires_at", ""),
+                    "status": "bad_expiry",
+                }
+            )
+        if not is_active(item):
+            continue
         entry = {
             "name": name,
             "employee": employee,
@@ -600,6 +627,9 @@ def handle_compliance(event, context=None):
         "aws_tiers": {},
         "claude_tiers": {},
         "leaderboard": {},
+        "expiry_warnings": sorted(
+            expiry_warnings, key=lambda e: (e["employee"], e["name"], e["expires_at"])
+        ),
     }
     for t, req in AWS_REQS.items():
         c = aws_grouped.get(t, [])
