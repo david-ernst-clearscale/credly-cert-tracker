@@ -1,4 +1,5 @@
 import os
+import sys
 import json
 import logging
 from datetime import datetime, timezone, timedelta
@@ -9,6 +10,12 @@ import urllib.parse
 
 import boto3
 from boto3.dynamodb.conditions import Key
+
+sys.path.insert(0, os.path.dirname(__file__))
+from cert_classifier import (
+    classify_certification,
+    is_certification_badge as is_aws_badge,
+)
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -30,11 +37,6 @@ AWS_CERT_ISSUERS = [
     "Amazon Web Services",
     "AWS",
 ]
-
-# Name markers for badges that carry "AWS Certified" but are NOT actual credentials
-# (e.g. the "AWS Certified AI Practitioner Early Adopter" beta badge). These are
-# excluded so they don't inflate cert counts or appear on the dashboard.
-NON_CERT_MARKERS = ("Early Adopter",)
 
 
 def lambda_handler(event: dict, context: Any) -> dict:
@@ -153,18 +155,6 @@ def fetch_credly_badges(username: str) -> list:
     return all_badges
 
 
-def is_aws_badge(badge: dict) -> bool:
-    """Check if a badge is a valid certification (AWS or Claude)."""
-    name = badge.get("badge_template", {}).get("name", "")
-    if any(marker in name for marker in NON_CERT_MARKERS):
-        return False
-    if "AWS Certified" in name:
-        return True
-    if "Claude Certified" in name:
-        return True
-    return False
-
-
 def compute_status(expires_at: str | None) -> str:
     """Compute certification status based on expiration date."""
     if not expires_at or expires_at == "no-expiry":
@@ -190,19 +180,6 @@ def compute_status(expires_at: str | None) -> str:
     elif days_until <= 90:
         return "upcoming_renewal"
     return "active"
-
-
-def classify_certification(cert_name: str) -> str:
-    """Classify cert into APN partner tier category."""
-    name_lower = cert_name.lower()
-
-    if "professional" in name_lower or "specialty" in name_lower:
-        return "Professional/Specialty"
-    elif "practitioner" in name_lower or "foundational" in name_lower:
-        return "Foundational"
-    elif "associate" in name_lower:
-        return "Technical"
-    return "Technical"
 
 
 def get_existing_cert(employee_id: str, cert_id: str) -> dict | None:
