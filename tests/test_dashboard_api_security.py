@@ -5,6 +5,7 @@ import os
 import sys
 import types
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 
 
@@ -218,6 +219,28 @@ class DashboardApiSecurityTests(unittest.TestCase):
         self.assertFalse(self.handler.is_active({"expires_at": "not-a-date"}))
         self.assertTrue(self.handler.is_active({"expires_at": "no-expiry"}))
         self.assertTrue(self.handler.is_active({"expires_at": ""}))
+
+    def test_is_active_normalizes_z_suffix_before_parsing(self):
+        original_datetime = self.handler.datetime
+
+        class RuntimeWithoutBareZ:
+            @staticmethod
+            def fromisoformat(value):
+                if value.endswith("Z"):
+                    raise ValueError("bare Z unsupported")
+                return datetime.fromisoformat(value)
+
+            @staticmethod
+            def now(tz=None):
+                return datetime(2025, 1, 1, tzinfo=tz or timezone.utc)
+
+        self.handler.datetime = RuntimeWithoutBareZ
+        try:
+            self.assertTrue(
+                self.handler.is_active({"expires_at": "2099-01-01T00:00:00Z"})
+            )
+        finally:
+            self.handler.datetime = original_datetime
 
     def test_compliance_exposes_bad_expiry_warnings_without_counting_them(self):
         certs_table = self.handler.dynamodb.Table("certs")

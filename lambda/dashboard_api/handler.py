@@ -265,7 +265,7 @@ def is_active(item):
     if not expires or expires == "no-expiry":
         return True
     try:
-        exp_date = datetime.fromisoformat(expires)
+        exp_date = datetime.fromisoformat(expires.replace("Z", "+00:00"))
         now = datetime.now(timezone.utc)
         if exp_date.tzinfo is None:
             exp_date = exp_date.replace(tzinfo=timezone.utc)
