@@ -1,9 +1,19 @@
 """REST API for dashboard — pulls data directly from DynamoDB."""
 
-import os, json, csv, io, base64, logging, urllib.request, urllib.parse, boto3
+import os, sys, json, csv, io, base64, logging, urllib.request, urllib.parse, boto3
 from collections import defaultdict
 from datetime import datetime, timezone
 from boto3.dynamodb.conditions import Key
+
+sys.path.insert(0, os.path.dirname(__file__))
+from cert_classifier import (
+    AWS_REQS,
+    CLAUDE_REQS,
+    classify_aws,
+    classify_certification,
+    classify_claude,
+    is_real_cert,
+)
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -218,43 +228,6 @@ def parse_apn_csv(text):
         "redacted_count": len(redacted_certs),
         "redacted_certs": redacted_certs,
     }
-
-
-AWS_REQS = {"Foundational": 10, "Technical": 25, "Professional/Specialty": 10}
-CLAUDE_REQS = {"CCAR-F": 10, "CCAR-P": 0, "CCDV-F": 0, "CCAO-F": 0}
-FOUNDATIONAL = ["Cloud Practitioner", "AI Practitioner"]
-PROFESSIONAL = ["Professional", "Specialty"]
-
-# Badges that contain "AWS Certified" but aren't real credentials (e.g. the
-# "AWS Certified AI Practitioner Early Adopter" beta badge). Excluded from all counts
-# so a stale record already in DynamoDB doesn't inflate tiers/leaderboard.
-NON_CERT_MARKERS = ("Early Adopter",)
-
-
-def is_real_cert(name):
-    return not any(m in name for m in NON_CERT_MARKERS)
-
-
-def classify_aws(name):
-    for kw in FOUNDATIONAL:
-        if kw in name:
-            return "Foundational"
-    for kw in PROFESSIONAL:
-        if kw in name:
-            return "Professional/Specialty"
-    return "Technical"
-
-
-def classify_claude(name):
-    if "Architect" in name and "Professional" in name:
-        return "CCAR-P"
-    if "Architect" in name and "Foundations" in name:
-        return "CCAR-F"
-    if "Developer" in name and "Foundations" in name:
-        return "CCDV-F"
-    if "Associate" in name and "Foundations" in name:
-        return "CCAO-F"
-    return "CCAO-F"
 
 
 def is_active(item):
