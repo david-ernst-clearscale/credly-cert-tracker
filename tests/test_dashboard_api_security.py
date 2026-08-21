@@ -290,6 +290,27 @@ class DashboardApiSecurityTests(unittest.TestCase):
             body["leaderboard"]["aws"],
         )
 
+    def test_unknown_claude_certification_does_not_increment_scored_buckets(self):
+        certs_table = self.handler.dynamodb.Table("certs")
+        certs_table.items = [
+            {
+                "employee_id": "jane.doe",
+                "certification_id": "cert-unknown-claude",
+                "certification_name": "Claude Certified Totally New Credential",
+                "expires_at": "no-expiry",
+                "status": "active",
+            }
+        ]
+
+        response = self.handler.handle_compliance({})
+
+        self.assertEqual(200, response["statusCode"])
+        body = json.loads(response["body"])
+        for tier in ("CCAR-F", "CCAR-P", "CCDV-F", "CCAO-F"):
+            self.assertEqual(0, body["claude_tiers"][tier]["current"])
+            self.assertEqual(0, body["claude_tiers"][tier]["cert_count"])
+            self.assertEqual([], body["claude_tiers"][tier]["certifications"])
+
     def test_compliance_includes_certifications_from_all_scan_pages(self):
         certs_table = self.handler.dynamodb.Table("certs")
         certs_table.scan_pages = [
