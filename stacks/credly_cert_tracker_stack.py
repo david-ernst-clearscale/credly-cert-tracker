@@ -163,10 +163,6 @@ class CredlyCertTrackerStack(Stack):
         )
         users_table.grant_read_data(compliance_reporter_fn)
 
-        # ─── Add cross-references ───
-        badge_sync_fn.add_environment("NOTIFICATION_LAMBDA_ARN", notification_handler_fn.function_arn)
-        badge_sync_fn.add_environment("SCHEDULER_ROLE_ARN", "")
-
         # ─── EventBridge: Daily 7 AM UTC schedule ───
         # Badge Sync and the Expiration Check run as two separate functions on the same
         # daily 7 AM trigger. They don't need to be ordered: the checker derives status
