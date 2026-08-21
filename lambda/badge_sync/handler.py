@@ -5,6 +5,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Any
 import urllib.request
 import urllib.error
+import urllib.parse
 
 import boto3
 from boto3.dynamodb.conditions import Key
@@ -119,7 +120,8 @@ def sync_user_badges(user: dict, results: dict):
 
 def fetch_credly_badges(username: str) -> list:
     """Fetch badges from Credly's public JSON endpoint."""
-    url = f"https://www.credly.com/users/{username}/badges.json"
+    encoded_username = urllib.parse.quote(username, safe="")
+    url = f"https://www.credly.com/users/{encoded_username}/badges.json"
     headers = {"Accept": "application/json", "User-Agent": "CertTracker/1.0"}
 
     all_badges = []
