@@ -1,5 +1,6 @@
 AWS_REQS = {"Foundational": 10, "Technical": 25, "Professional/Specialty": 10}
 CLAUDE_REQS = {"CCAR-F": 10, "CCAR-P": 0, "CCDV-F": 0, "CCAO-F": 0}
+CLAUDE_UNKNOWN = "Unknown"
 
 FOUNDATIONAL = ("Cloud Practitioner", "AI Practitioner")
 PROFESSIONAL = ("Professional", "Specialty")
@@ -44,4 +45,4 @@ def classify_claude(name):
         return "CCDV-F"
     if "Associate" in name and "Foundations" in name:
         return "CCAO-F"
-    return "CCAO-F"
+    return CLAUDE_UNKNOWN

@@ -601,6 +601,8 @@ def handle_compliance(event, context=None):
                     aws_individuals["Professional/Specialty"].add(employee)
         elif "Claude Certified" in name:
             cband = classify_claude(name)
+            if cband not in CLAUDE_REQS:
+                continue
             claude_grouped[cband].append(entry)
             claude_counts[employee] += 1
             claude_individuals[cband].add(employee)

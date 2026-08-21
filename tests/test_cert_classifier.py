@@ -86,7 +86,7 @@ class CertificationClassifierTests(unittest.TestCase):
             "Claude Certified Architect - Professional": "CCAR-P",
             "Claude Certified Developer - Foundations": "CCDV-F",
             "Claude Certified Associate - Foundations": "CCAO-F",
-            "Claude Certified Totally New Credential": "CCAO-F",
+            "Claude Certified Totally New Credential": "Unknown",
         }
 
         for helper in helpers:
@@ -98,6 +98,7 @@ class CertificationClassifierTests(unittest.TestCase):
                 {"CCAR-F": 10, "CCAR-P": 0, "CCDV-F": 0, "CCAO-F": 0},
                 helper.CLAUDE_REQS,
             )
+            self.assertNotIn("Unknown", helper.CLAUDE_REQS)
             for name, category in aws_cases.items():
                 self.assertTrue(helper.is_real_cert(name))
                 self.assertEqual(category, helper.classify_aws(name))
@@ -142,7 +143,7 @@ class CertificationClassifierTests(unittest.TestCase):
             "Claude Certified Architect - Professional": "CCAR-P",
             "Claude Certified Developer - Foundations": "CCDV-F",
             "Claude Certified Associate - Foundations": "CCAO-F",
-            "Claude Certified Totally New Credential": "CCAO-F",
+            "Claude Certified Totally New Credential": "Unknown",
             "AWS Certified AI Practitioner Early Adopter": None,
         }
 
