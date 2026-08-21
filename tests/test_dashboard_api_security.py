@@ -100,13 +100,22 @@ def admin_event(body):
     }
 
 
+def roster_event(body, email="admin@example.com", **overrides):
+    event = {
+        "requestContext": {"authorizer": {"claims": {"email": email}}},
+        "body": body,
+    }
+    event.update(overrides)
+    return event
+
+
 class DashboardApiSecurityTests(unittest.TestCase):
     def setUp(self):
         self.handler, self.s3 = load_handler()
 
     def test_roster_upload_rejects_decoded_body_over_byte_limit(self):
         oversized_csv = CSV_HEADER + ("x" * (10 * 1024 * 1024 + 1))
-        response = self.handler.handle_roster_upload({"body": oversized_csv})
+        response = self.handler.handle_roster_upload(roster_event(oversized_csv))
 
         self.assertEqual(413, response["statusCode"])
         body = json.loads(response["body"])
@@ -116,10 +125,10 @@ class DashboardApiSecurityTests(unittest.TestCase):
     def test_roster_upload_rejects_base64_decoded_body_over_byte_limit(self):
         oversized_bytes = (CSV_HEADER + ("x" * (10 * 1024 * 1024 + 1))).encode("utf-8")
         response = self.handler.handle_roster_upload(
-            {
-                "body": base64.b64encode(oversized_bytes).decode("ascii"),
-                "isBase64Encoded": True,
-            }
+            roster_event(
+                base64.b64encode(oversized_bytes).decode("ascii"),
+                isBase64Encoded=True,
+            )
         )
 
         self.assertEqual(413, response["statusCode"])
@@ -134,7 +143,7 @@ class DashboardApiSecurityTests(unittest.TestCase):
             self.handler.parse_apn_csv(csv_text)
 
     def test_roster_upload_accepts_normal_small_csv(self):
-        response = self.handler.handle_roster_upload({"body": CSV_HEADER + CSV_ROW})
+        response = self.handler.handle_roster_upload(roster_event(CSV_HEADER + CSV_ROW))
 
         self.assertEqual(200, response["statusCode"])
         body = json.loads(response["body"])
@@ -142,6 +151,16 @@ class DashboardApiSecurityTests(unittest.TestCase):
         self.assertEqual(1, body["named_people"])
         self.assertEqual(0, body["redacted_count"])
         self.assertEqual(1, len(self.s3.objects))
+
+    def test_roster_upload_rejects_non_admin_authenticated_caller(self):
+        response = self.handler.handle_roster_upload(
+            roster_event(CSV_HEADER + CSV_ROW, email="analyst@example.com")
+        )
+
+        self.assertEqual(403, response["statusCode"])
+        body = json.loads(response["body"])
+        self.assertIn("permission", body["error"].lower())
+        self.assertEqual([], self.s3.objects)
 
     def test_upsert_user_rejects_path_like_credly_username(self):
         response = self.handler.handle_upsert_user(
