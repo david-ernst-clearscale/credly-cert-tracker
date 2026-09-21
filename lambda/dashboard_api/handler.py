@@ -28,6 +28,9 @@ MAX_APN_CSV_BYTES = 10 * 1024 * 1024
 MAX_APN_CSV_ROWS = 25000
 MAX_ADMIN_IDENTIFIER_LENGTH = 128
 ADMIN_IDENTIFIER_DELIMITERS = ("/", "?", "#", "\\")
+# AWS Partner Central official tier totals (manually entered — AWS counts redacted
+# people we can't see, so these can't be derived).
+OFFICIAL_KEY = "apn_official.json"
 
 # Comma-separated allowlist of emails permitted to add/edit users or trigger a sync.
 # Reads/list are open to any authenticated user; writes require membership here.
@@ -177,6 +180,20 @@ def get_roster():
         except Exception as e:  # bucket/permission/parse issue — fall back, don't 500
             logger.warning(f"Could not read roster from S3, using bundled: {e}")
     return BUNDLED_ROSTER
+
+
+def get_official_apn():
+    """AWS Partner Central official tier totals (manually maintained in S3)."""
+    default = {"foundational": 0, "technical": 0, "professional_specialty": 0, "updated_at": "", "updated_by": ""}
+    if ROSTER_BUCKET:
+        try:
+            obj = s3.get_object(Bucket=ROSTER_BUCKET, Key=OFFICIAL_KEY)
+            return {**default, **json.loads(obj["Body"].read().decode("utf-8"))}
+        except s3.exceptions.NoSuchKey:
+            pass
+        except Exception as e:
+            logger.warning(f"Could not read official APN totals: {e}")
+    return default
 
 
 def parse_apn_csv(text):
@@ -668,6 +685,8 @@ def handle_compliance(event, context=None):
     result["leaderboard"]["aws"] = with_ranks(aws_sorted)
     result["leaderboard"]["claude"] = with_ranks(claude_sorted)
     result["apn_network"] = build_apn_network(get_roster(), aws_holder_ids, aws_counts)
+    result["apn_network"]["official"] = get_official_apn()
+    result["is_admin"] = _is_admin(event)
     return {
         "statusCode": 200,
         "headers": {
@@ -834,6 +853,37 @@ def handle_trigger_sync(event):
     return _resp(
         202, {"ok": True, "message": "Sync started — badges refresh in ~1-2 minutes."}
     )
+
+
+def handle_official_upsert(event):
+    """POST /apn-official — set AWS Partner Central official tier totals. Admin-only."""
+    if not _is_admin(event):
+        return _resp(403, {"error": "You don't have permission to edit the official APN totals."})
+    if not ROSTER_BUCKET:
+        return _resp(500, {"error": "Storage is not configured."})
+    try:
+        data = json.loads(event.get("body") or "{}")
+    except ValueError:
+        return _resp(400, {"error": "Invalid JSON body."})
+
+    def num(v):
+        try:
+            return max(0, int(v))
+        except (TypeError, ValueError):
+            return 0
+    official = {
+        "foundational": num(data.get("foundational")),
+        "technical": num(data.get("technical")),
+        "professional_specialty": num(data.get("professional_specialty")),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "updated_by": _caller_email(event),
+    }
+    s3.put_object(
+        Bucket=ROSTER_BUCKET, Key=OFFICIAL_KEY,
+        Body=json.dumps(official).encode("utf-8"), ContentType="application/json",
+    )
+    logger.info(f"Official APN totals set by {_caller_email(event)}: {official}")
+    return _resp(200, {"ok": True, "official": official})
 
 
 def _email_for(acct):
@@ -1047,4 +1097,6 @@ def lambda_handler(event, context):
         return handle_trigger_sync(event)
     if resource.endswith("/apn-roster") and method == "POST":
         return handle_roster_upload(event)
+    if resource.endswith("/apn-official") and method == "POST":
+        return handle_official_upsert(event)
     return handle_compliance(event, context)

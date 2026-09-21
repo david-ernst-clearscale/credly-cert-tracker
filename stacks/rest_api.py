@@ -113,6 +113,10 @@ class DashboardRestApiConstruct(Construct):
         sync_resource = api.root.add_resource("sync")
         sync_resource.add_method("POST", integration, **method_options)
 
+        # POST /apn-official — set AWS Partner Central official tier totals (admin-only).
+        official_resource = api.root.add_resource("apn-official")
+        official_resource.add_method("POST", integration, **method_options)
+
         # Weekly Slack digest: EventBridge invokes the same Lambda (outside API Gateway)
         # with a task marker; the handler posts the "AWS cert on Credly but not on APN"
         # list to Slack. The webhook URL lives in Secrets Manager (populated out-of-band);

@@ -25,6 +25,24 @@ cd ..
 echo "�� Deploying CDK stack..."
 cdk deploy --all --require-approval never
 
+# Belt-and-suspenders: push the built frontend straight to the hosting bucket and
+# invalidate CloudFront. CDK's BucketDeployment no-ops when the build hash is
+# unchanged, so if the bucket was ever emptied out-of-band it would NOT be restored
+# by the deploy above — leaving the site as an S3 AccessDenied page. This guarantees
+# the files are present and the cache is fresh on every deploy.
+echo "☁️  Syncing frontend to S3 + invalidating CloudFront..."
+BUCKET=$(aws cloudformation describe-stack-resources --stack-name CredlyCertTrackerStack \
+  --query "StackResources[?ResourceType=='AWS::S3::Bucket' && contains(LogicalResourceId, 'DashboardBucket')].PhysicalResourceId | [0]" --output text)
+DIST=$(aws cloudformation describe-stack-resources --stack-name CredlyCertTrackerStack \
+  --query "StackResources[?ResourceType=='AWS::CloudFront::Distribution'].PhysicalResourceId | [0]" --output text)
+if [ -n "$BUCKET" ] && [ "$BUCKET" != "None" ]; then
+  aws s3 sync frontend/dist/ "s3://$BUCKET/" --delete
+fi
+if [ -n "$DIST" ] && [ "$DIST" != "None" ]; then
+  aws cloudfront create-invalidation --distribution-id "$DIST" --paths "/*" >/dev/null \
+    && echo "   CloudFront $DIST invalidated"
+fi
+
 echo "✅ Done! Dashboard URL:"
 aws cloudformation describe-stacks \
   --stack-name CredlyCertTrackerStack \
