@@ -73,7 +73,7 @@ Everything is serverless and defined with the **AWS CDK (Python)**. One `cdk dep
 
 Two DynamoDB tables, both `PAY_PER_REQUEST`, both `RETAIN` on delete so data survives a stack teardown.
 
-**`credly-users`** — partition key `employee_id` (e.g. `jimmy.chui`). Attributes: `credly_username`, `consent_status`, `email`, `name`, and an optional `role` (used to find admins for breach alerts). This is the roster of people we track; a user is only synced if `consent_status = opted_in`.
+**`credly-users`** — partition key `employee_id` (e.g. `dana.whitfield`). Attributes: `credly_username`, `consent_status`, `email`, `name`, and an optional `role` (used to find admins for breach alerts). This is the roster of people we track; a user is only synced if `consent_status = opted_in`.
 
 **`credly-certifications`** — partition key `employee_id`, sort key `certification_id`. Written by the sync job: `certification_name`, `credly_username`, `issued_at`, `expires_at`, `status`, `partner_tier_category`, `badge_url`, `last_synced`. A **global secondary index `by-expiration`** (partition `status`, sort `expires_at`) supports expiry-oriented queries, and the table has **DynamoDB Streams** enabled (`NEW_AND_OLD_IMAGES`) for future event-driven consumers.
 
@@ -140,9 +140,9 @@ The APN CSV changes often, so rather than bake it into a deploy, the dashboard l
 
 ## The reconciliation engine (the interesting part)
 
-The "AWS APN Network" tab answers a deceptively hard question: **does the person AWS lists in the APN portal line up with the badge we see on Credly?** The two systems don't share a key. The APN export lists *Jimmy Chui / jimmy@clearscale.com*; Credly stores *employee_id `jimmy.chui`, username `jimmy-chui`*. Email-only matching misses him.
+The "AWS APN Network" tab answers a deceptively hard question: **does the person AWS lists in the APN portal line up with the badge we see on Credly?** The two systems don't share a key. The APN export lists *Dana Whitfield / dana@example.com*; Credly stores *employee_id `dana.whitfield`, username `dana-whitfield`*. Email-only matching misses her.
 
-So matching is done on a **set of normalized identity keys**. For each person on each side we generate keys from name, `employee_id`, `credly_username`, and the email local-part, each in dotted and spaced variants (`jimmy chui`, `jimmy.chui`, …). Two records match if **any** key overlaps. This resolves the Jimmy case via his name while still cleanly separating unrelated people (validated to produce no false positives on the real roster).
+So matching is done on a **set of normalized identity keys**. For each person on each side we generate keys from name, `employee_id`, `credly_username`, and the email local-part, each in dotted and spaced variants (`dana whitfield`, `dana.whitfield`, …). Two records match if **any** key overlaps. This resolves the case above via the name while still cleanly separating unrelated people (validated to produce no false positives on the real roster).
 
 From that matching the tab derives four buckets:
 
