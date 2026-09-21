@@ -2,7 +2,8 @@
 
 Serverless app that tracks AWS and Anthropic certifications across the team, computes AWS Partner Network / Claude Partner Network tier compliance, and shows a live dashboard with a leaderboard. Built on AWS CDK (Python) with a React/TypeScript frontend.
 
-**Live dashboard:** https://REDACTED.cloudfront.net
+The deployed dashboard is internal and sign-in gated; its URL is an output of the
+CDK stack (`DashboardUrl`) rather than something published here.
 
 ## Architecture
 ![Dashboard screenshot](docs/images/architecture.png)
