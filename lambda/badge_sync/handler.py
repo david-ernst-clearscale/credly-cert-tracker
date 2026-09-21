@@ -1,13 +1,21 @@
 import os
+import sys
 import json
 import logging
 from datetime import datetime, timezone, timedelta
 from typing import Any
 import urllib.request
 import urllib.error
+import urllib.parse
 
 import boto3
 from boto3.dynamodb.conditions import Key
+
+sys.path.insert(0, os.path.dirname(__file__))
+from cert_classifier import (
+    classify_certification,
+    is_certification_badge as is_aws_badge,
+)
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -29,11 +37,6 @@ AWS_CERT_ISSUERS = [
     "Amazon Web Services",
     "AWS",
 ]
-
-# Name markers for badges that carry "AWS Certified" but are NOT actual credentials
-# (e.g. the "AWS Certified AI Practitioner Early Adopter" beta badge). These are
-# excluded so they don't inflate cert counts or appear on the dashboard.
-NON_CERT_MARKERS = ("Early Adopter",)
 
 
 def lambda_handler(event: dict, context: Any) -> dict:
@@ -119,7 +122,8 @@ def sync_user_badges(user: dict, results: dict):
 
 def fetch_credly_badges(username: str) -> list:
     """Fetch badges from Credly's public JSON endpoint."""
-    url = f"https://www.credly.com/users/{username}/badges.json"
+    encoded_username = urllib.parse.quote(username, safe="")
+    url = f"https://www.credly.com/users/{encoded_username}/badges.json"
     headers = {"Accept": "application/json", "User-Agent": "CertTracker/1.0"}
 
     all_badges = []
@@ -151,23 +155,19 @@ def fetch_credly_badges(username: str) -> list:
     return all_badges
 
 
-def is_aws_badge(badge: dict) -> bool:
-    """Check if a badge is a valid certification (AWS or Claude)."""
-    name = badge.get("badge_template", {}).get("name", "")
-    if any(marker in name for marker in NON_CERT_MARKERS):
-        return False
-    if "AWS Certified" in name:
-        return True
-    if "Claude Certified" in name:
-        return True
-    return False
-
 def compute_status(expires_at: str | None) -> str:
     """Compute certification status based on expiration date."""
-    if not expires_at:
+    if not expires_at or expires_at == "no-expiry":
         return "active"
 
-    expiry = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+    try:
+        expiry = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+    except ValueError:
+        logger.warning(f"Flagging invalid expiration date as bad_expiry: {expires_at}")
+        return "bad_expiry"
+
+    if expiry.tzinfo is None:
+        expiry = expiry.replace(tzinfo=timezone.utc)
     now = datetime.now(timezone.utc)
     days_until = (expiry - now).days
 
@@ -182,19 +182,6 @@ def compute_status(expires_at: str | None) -> str:
     return "active"
 
 
-def classify_certification(cert_name: str) -> str:
-    """Classify cert into APN partner tier category."""
-    name_lower = cert_name.lower()
-
-    if "professional" in name_lower or "specialty" in name_lower:
-        return "Professional/Specialty"
-    elif "practitioner" in name_lower or "foundational" in name_lower:
-        return "Foundational"
-    elif "associate" in name_lower:
-        return "Technical"
-    return "Technical"
-
-
 def get_existing_cert(employee_id: str, cert_id: str) -> dict | None:
     """Check if cert already exists in DynamoDB."""
     try:
@@ -206,12 +193,26 @@ def get_existing_cert(employee_id: str, cert_id: str) -> dict | None:
         return None
 
 
-def create_reminder_schedules(employee_id: str, cert_id: str, cert_name: str, expires_at: str):
+def create_reminder_schedules(
+    employee_id: str, cert_id: str, cert_name: str, expires_at: str
+):
     """Create EventBridge one-time schedules for expiry reminders."""
     if not SCHEDULER_ROLE_ARN:
         logger.info("Skipping scheduler - no SCHEDULER_ROLE_ARN configured")
         return
-    expiry = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+    if expires_at == "no-expiry":
+        logger.warning("Skipping reminder schedules for non-expiring certification")
+        return
+    try:
+        expiry = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+    except ValueError:
+        logger.warning(
+            f"Skipping reminder schedules for invalid expiration date: {expires_at}"
+        )
+        return
+
+    if expiry.tzinfo is None:
+        expiry = expiry.replace(tzinfo=timezone.utc)
 
     for days in REMINDER_DAYS:
         reminder_date = expiry - timedelta(days=days)
@@ -229,14 +230,16 @@ def create_reminder_schedules(employee_id: str, cert_id: str, cert_name: str, ex
                 Target={
                     "Arn": os.environ["NOTIFICATION_LAMBDA_ARN"],
                     "RoleArn": os.environ["SCHEDULER_ROLE_ARN"],
-                    "Input": json.dumps({
-                        "type": "expiry_reminder",
-                        "employee_id": employee_id,
-                        "certification_id": cert_id,
-                        "certification_name": cert_name,
-                        "expires_at": expires_at or "no-expiry",
-                        "days_remaining": days,
-                    }),
+                    "Input": json.dumps(
+                        {
+                            "type": "expiry_reminder",
+                            "employee_id": employee_id,
+                            "certification_id": cert_id,
+                            "certification_name": cert_name,
+                            "expires_at": expires_at or "no-expiry",
+                            "days_remaining": days,
+                        }
+                    ),
                 },
                 ActionAfterCompletion="DELETE",
             )

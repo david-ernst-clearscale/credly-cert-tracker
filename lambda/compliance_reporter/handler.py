@@ -1,4 +1,5 @@
 import os
+import sys
 import json
 import logging
 from datetime import datetime, timezone
@@ -6,6 +7,9 @@ from collections import defaultdict
 
 import boto3
 from boto3.dynamodb.conditions import Attr
+
+sys.path.insert(0, os.path.dirname(__file__))
+from cert_classifier import AWS_REQS as THRESHOLDS
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -20,12 +24,6 @@ NOTIFICATION_LAMBDA = os.environ.get("NOTIFICATION_LAMBDA_ARN", "")
 
 certs_table = dynamodb.Table(CERTS_TABLE)
 users_table = dynamodb.Table(USERS_TABLE)
-
-THRESHOLDS = {
-    "Foundational": 10,
-    "Technical": 25,
-    "Professional/Specialty": 10,
-}
 
 
 def lambda_handler(event: dict, context) -> dict:
@@ -64,16 +62,20 @@ def lambda_handler(event: dict, context) -> dict:
             risk_level = "RED"
 
         # Publish metrics
-        publish_metrics(tier, current, required, percentage, at_risk, projected_pct, risk_level)
+        publish_metrics(
+            tier, current, required, percentage, at_risk, projected_pct, risk_level
+        )
 
         # Check for breach
         if risk_level == "RED":
-            breaches.append({
-                "tier": tier,
-                "current": current,
-                "required": required,
-                "risk_level": risk_level,
-            })
+            breaches.append(
+                {
+                    "tier": tier,
+                    "current": current,
+                    "required": required,
+                    "risk_level": risk_level,
+                }
+            )
 
     # Trigger notifications for breaches
     for breach in breaches:
@@ -85,7 +87,9 @@ def lambda_handler(event: dict, context) -> dict:
             tier: {
                 "current": counts.get(tier, 0),
                 "required": req,
-                "percentage": round((counts.get(tier, 0) / req * 100), 1) if req > 0 else 100,
+                "percentage": round((counts.get(tier, 0) / req * 100), 1)
+                if req > 0
+                else 100,
             }
             for tier, req in THRESHOLDS.items()
         },
@@ -97,9 +101,7 @@ def lambda_handler(event: dict, context) -> dict:
 
 
 def get_active_certs() -> list:
-    response = certs_table.scan(
-        FilterExpression=Attr("status").ne("expired")
-    )
+    response = certs_table.scan(FilterExpression=Attr("status").ne("expired"))
     certs = response.get("Items", [])
     while "LastEvaluatedKey" in response:
         response = certs_table.scan(
@@ -110,18 +112,45 @@ def get_active_certs() -> list:
     return certs
 
 
-def publish_metrics(tier, current, required, percentage, at_risk, projected_pct, risk_level):
+def publish_metrics(
+    tier, current, required, percentage, at_risk, projected_pct, risk_level
+):
     namespace = "CredlyCertTracker"
     dimensions = [{"Name": "Tier", "Value": tier}]
 
     cloudwatch.put_metric_data(
         Namespace=namespace,
         MetricData=[
-            {"MetricName": "CurrentCerts", "Value": current, "Unit": "Count", "Dimensions": dimensions},
-            {"MetricName": "RequiredCerts", "Value": required, "Unit": "Count", "Dimensions": dimensions},
-            {"MetricName": "CompliancePercentage", "Value": percentage, "Unit": "Percent", "Dimensions": dimensions},
-            {"MetricName": "ExpiringWithin90Days", "Value": at_risk, "Unit": "Count", "Dimensions": dimensions},
-            {"MetricName": "ProjectedCompliance", "Value": projected_pct, "Unit": "Percent", "Dimensions": dimensions},
+            {
+                "MetricName": "CurrentCerts",
+                "Value": current,
+                "Unit": "Count",
+                "Dimensions": dimensions,
+            },
+            {
+                "MetricName": "RequiredCerts",
+                "Value": required,
+                "Unit": "Count",
+                "Dimensions": dimensions,
+            },
+            {
+                "MetricName": "CompliancePercentage",
+                "Value": percentage,
+                "Unit": "Percent",
+                "Dimensions": dimensions,
+            },
+            {
+                "MetricName": "ExpiringWithin90Days",
+                "Value": at_risk,
+                "Unit": "Count",
+                "Dimensions": dimensions,
+            },
+            {
+                "MetricName": "ProjectedCompliance",
+                "Value": projected_pct,
+                "Unit": "Percent",
+                "Dimensions": dimensions,
+            },
         ],
     )
 
