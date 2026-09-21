@@ -11,6 +11,10 @@ from aws_cdk import (
     aws_cloudwatch_actions as cw_actions,
     aws_sns as sns,
     aws_sns_subscriptions as subs,
+    aws_lambda as _lambda,
+    aws_events as events,
+    aws_events_targets as targets,
+    aws_iam as iam,
 )
 from constructs import Construct
 
@@ -37,6 +41,19 @@ class StaticHostingConstruct(Construct):
             # a deploy pruning against an empty dist), versioning leaves
             # delete-markers we can roll back instead of losing them silently.
             versioned=True,
+            lifecycle_rules=[
+                # The keep-alive below self-copies every object weekly, which
+                # creates a new version each time. Without this the bucket would
+                # accumulate a version per object per week forever. 60 days is a
+                # deliberate floor: it must comfortably outlive the cleaner's
+                # 14-day sweep so a delete marker always still has a real version
+                # underneath it to restore.
+                s3.LifecycleRule(
+                    id="ExpireOldFrontendVersions",
+                    noncurrent_version_expiration=Duration.days(60),
+                    abort_incomplete_multipart_upload_after=Duration.days(7),
+                ),
+            ],
         )
 
         self.distribution = cloudfront.Distribution(
@@ -78,6 +95,68 @@ class StaticHostingConstruct(Construct):
             self,
             "DashboardUrl",
             value=f"https://{self.distribution.distribution_domain_name}",
+        )
+
+        # ─── Keep-alive: keep the deployed frontend from ageing out ───
+        # Some accounts run scheduled housekeeping that deletes S3 objects past a
+        # maximum age. A static frontend is never rewritten after a deploy, so its
+        # objects age indefinitely and can be swept, leaving the site serving an
+        # S3 error page until someone redeploys by hand.
+        # Versioning (above) makes that recoverable and the alarms (below) make it
+        # visible — this is the piece that stops it happening at all, by refreshing
+        # every object's LastModified on a schedule well inside any such window.
+        keepalive_fn = _lambda.Function(
+            self, "SiteKeepAliveFn",
+            function_name="credly-site-keepalive",
+            runtime=_lambda.Runtime.PYTHON_3_12,
+            handler="handler.lambda_handler",
+            code=_lambda.Code.from_asset("lambda/site_keepalive"),
+            environment={
+                "HOSTING_BUCKET": self.bucket.bucket_name,
+                "DISTRIBUTION_ID": self.distribution.distribution_id,
+            },
+            timeout=Duration.minutes(5),
+            memory_size=256,
+        )
+        self.bucket.grant_read_write(keepalive_fn)
+        # grant_read_write covers object CRUD, but restoring a swept bucket also
+        # needs the version-scoped calls: listing versions to find delete markers
+        # and deleting the marker itself.
+        keepalive_fn.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=["s3:ListBucketVersions", "s3:GetObjectVersion"],
+                resources=[self.bucket.bucket_arn, self.bucket.arn_for_objects("*")],
+            )
+        )
+        keepalive_fn.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=["s3:DeleteObjectVersion"],
+                resources=[self.bucket.arn_for_objects("*")],
+            )
+        )
+        keepalive_fn.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=["cloudfront:CreateInvalidation"],
+                # CreateInvalidation can be scoped to the distribution ARN, which
+                # is safer than the "*" this would otherwise need.
+                resources=[
+                    Stack.of(self).format_arn(
+                        service="cloudfront",
+                        region="",
+                        resource="distribution",
+                        resource_name=self.distribution.distribution_id,
+                    )
+                ],
+            )
+        )
+
+        # Weekly, not daily: 7 days gives a full 2x margin against the cleaner's
+        # 14-day threshold, so a single missed run still can't lose the site.
+        events.Rule(
+            self, "SiteKeepAliveRule",
+            rule_name="credly-site-keepalive",
+            schedule=events.Schedule.rate(Duration.days(7)),
+            targets=[targets.LambdaFunction(keepalive_fn)],
         )
 
         # ─── Site-health alarms ───
