@@ -45,8 +45,8 @@ class StaticHostingConstruct(Construct):
                 # The keep-alive below self-copies every object weekly, which
                 # creates a new version each time. Without this the bucket would
                 # accumulate a version per object per week forever. 60 days is a
-                # deliberate floor: it must comfortably outlive the cleaner's
-                # 14-day sweep so a delete marker always still has a real version
+                # deliberate floor: it must comfortably outlive any age-based
+                # sweep so a delete marker always still has a real version
                 # underneath it to restore.
                 s3.LifecycleRule(
                     id="ExpireOldFrontendVersions",
@@ -58,7 +58,9 @@ class StaticHostingConstruct(Construct):
 
         self.distribution = cloudfront.Distribution(
             self,
-            "Distribution",
+            # Logical ID bumped to force replacement, which assigns a new
+            # cloudfront.net domain. The previous one had been published.
+            "DistributionV2",
             default_behavior=cloudfront.BehaviorOptions(
                 origin=origins.S3BucketOrigin.with_origin_access_control(self.bucket),
                 viewer_protocol_policy=cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
@@ -150,8 +152,8 @@ class StaticHostingConstruct(Construct):
             )
         )
 
-        # Weekly, not daily: 7 days gives a full 2x margin against the cleaner's
-        # 14-day threshold, so a single missed run still can't lose the site.
+        # Weekly, not daily: a 7-day refresh leaves a wide margin under any
+        # realistic age threshold, so a single missed run still can't lose the site.
         events.Rule(
             self, "SiteKeepAliveRule",
             rule_name="credly-site-keepalive",
