@@ -288,8 +288,8 @@ def _identity_keys(name="", email="", employee_id="", credly_username=""):
     different alias conventions across APN and Credly.
 
     The APN export and the Credly users table don't share a single reliable key:
-    e.g. APN has "Jimmy Chui" / jimmy@clearscale.com while Credly stores
-    employee_id "jimmy.chui". So we generate several forms of each identifier
+    e.g. APN has "Dana Whitfield" / dana@example.com while Credly stores
+    employee_id "dana.whitfield". So we generate several forms of each identifier
     (dotted, spaced, email local-part) and match if ANY overlap.
     """
     keys = set()
