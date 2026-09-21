@@ -1,8 +1,19 @@
 """REST API for dashboard — pulls data directly from DynamoDB."""
-import os, json, csv, io, base64, logging, urllib.request, urllib.parse, boto3
+
+import os, sys, json, csv, io, base64, logging, urllib.request, urllib.parse, boto3
 from collections import defaultdict
 from datetime import datetime, timezone
 from boto3.dynamodb.conditions import Key
+
+sys.path.insert(0, os.path.dirname(__file__))
+from cert_classifier import (
+    AWS_REQS,
+    CLAUDE_REQS,
+    classify_aws,
+    classify_certification,
+    classify_claude,
+    is_real_cert,
+)
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -13,10 +24,18 @@ CERTS_TABLE = os.environ["CERTS_TABLE"]
 USERS_TABLE = os.environ["USERS_TABLE"]
 ROSTER_BUCKET = os.environ.get("ROSTER_BUCKET", "")
 ROSTER_KEY = "apn_roster.json"
+MAX_APN_CSV_BYTES = 10 * 1024 * 1024
+MAX_APN_CSV_ROWS = 25000
+MAX_ADMIN_IDENTIFIER_LENGTH = 128
+ADMIN_IDENTIFIER_DELIMITERS = ("/", "?", "#", "\\")
 
 # Comma-separated allowlist of emails permitted to add/edit users or trigger a sync.
 # Reads/list are open to any authenticated user; writes require membership here.
-ADMIN_EMAILS = {e.strip().lower() for e in os.environ.get("ADMIN_EMAILS", "").split(",") if e.strip()}
+ADMIN_EMAILS = {
+    e.strip().lower()
+    for e in os.environ.get("ADMIN_EMAILS", "").split(",")
+    if e.strip()
+}
 BADGE_SYNC_FUNCTION = os.environ.get("BADGE_SYNC_FUNCTION", "")
 lambda_client = boto3.client("lambda")
 secrets = boto3.client("secretsmanager")
@@ -32,7 +51,9 @@ EMAIL_DOMAIN = os.environ.get("EMAIL_DOMAIN", "clearscale.com")
 # member ID (in Slack: her profile → ⋮ More → Copy member ID) so the digest @-tags her.
 # Until then it falls back to plain text "Salome" (no ping).
 SALOME_SLACK_ID = "U065UKPB942"  # salome.chimakadze
-SALOME_MENTION = "Salome" if SALOME_SLACK_ID.startswith("REPLACE") else f"<@{SALOME_SLACK_ID}>"
+SALOME_MENTION = (
+    "Salome" if SALOME_SLACK_ID.startswith("REPLACE") else f"<@{SALOME_SLACK_ID}>"
+)
 
 # Instructions posted with the weekly Slack digest. Edit this text to change the guidance.
 GAP_INSTRUCTIONS = (
@@ -73,7 +94,9 @@ def post_slack(text, webhook_secret=None):
         logger.warning("No Slack webhook configured; skipping post.")
         return False
     data = json.dumps({"text": text}).encode("utf-8")
-    req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
+    req = urllib.request.Request(
+        url, data=data, headers={"Content-Type": "application/json"}
+    )
     urllib.request.urlopen(req, timeout=10)
     return True
 
@@ -91,7 +114,9 @@ def get_slack_bot_token():
         _slack_bot_token_cache = ""
         return ""
     try:
-        _slack_bot_token_cache = secrets.get_secret_value(SecretId=SLACK_BOT_TOKEN_SECRET)["SecretString"].strip()
+        _slack_bot_token_cache = secrets.get_secret_value(
+            SecretId=SLACK_BOT_TOKEN_SECRET
+        )["SecretString"].strip()
     except Exception as e:
         logger.error(f"Could not read Slack bot token secret: {e}")
         _slack_bot_token_cache = ""
@@ -114,7 +139,9 @@ def slack_lookup_user_id(email):
         return None
     uid = None
     try:
-        url = "https://slack.com/api/users.lookupByEmail?email=" + urllib.parse.quote(email)
+        url = "https://slack.com/api/users.lookupByEmail?email=" + urllib.parse.quote(
+            email
+        )
         req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
         with urllib.request.urlopen(req, timeout=10) as r:
             data = json.loads(r.read().decode())
@@ -126,6 +153,7 @@ def slack_lookup_user_id(email):
         logger.warning(f"Slack lookup failed for {email}: {e}")
     _slack_id_cache[email] = uid
     return uid
+
 
 # Bundled APN roster (parsed from the last CSV export committed to the repo). Used as a
 # seed/fallback until someone uploads a fresh CSV on the tab, after which the uploaded
@@ -167,7 +195,11 @@ def parse_apn_csv(text):
             "CSV is missing required columns. Expected at least: "
             "'User name', 'User work email', 'Certification name'."
         )
-    for row in reader:
+    for row_number, row in enumerate(reader, start=1):
+        if row_number > MAX_APN_CSV_ROWS:
+            raise ValueError(
+                f"APN CSV has more than {MAX_APN_CSV_ROWS:,} rows. Please upload a smaller export."
+            )
         name = (row.get("User name") or "").strip()
         email = (row.get("User work email") or "").strip()
         cert = {
@@ -176,7 +208,11 @@ def parse_apn_csv(text):
             "award_date": (row.get("Award date") or "").split(" ")[0],
             "expiration_date": (row.get("Expiration date") or "").split(" ")[0],
         }
-        if not email or email.upper().startswith("XXX") or name.upper().startswith("XXX"):
+        if (
+            not email
+            or email.upper().startswith("XXX")
+            or name.upper().startswith("XXX")
+        ):
             redacted_certs.append(cert)
             continue
         # Work email is read only to detect redacted rows and de-dupe; not stored.
@@ -193,50 +229,37 @@ def parse_apn_csv(text):
         "redacted_certs": redacted_certs,
     }
 
-AWS_REQS = {"Foundational": 10, "Technical": 25, "Professional/Specialty": 10}
-CLAUDE_REQS = {"CCAR-F": 10, "CCAR-P": 0, "CCDV-F": 0, "CCAO-F": 0}
-FOUNDATIONAL = ["Cloud Practitioner", "AI Practitioner"]
-PROFESSIONAL = ["Professional", "Specialty"]
-
-# Badges that contain "AWS Certified" but aren't real credentials (e.g. the
-# "AWS Certified AI Practitioner Early Adopter" beta badge). Excluded from all counts
-# so a stale record already in DynamoDB doesn't inflate tiers/leaderboard.
-NON_CERT_MARKERS = ("Early Adopter",)
-def is_real_cert(name):
-    return not any(m in name for m in NON_CERT_MARKERS)
-
-def classify_aws(name):
-    for kw in FOUNDATIONAL:
-        if kw in name:
-            return "Foundational"
-    for kw in PROFESSIONAL:
-        if kw in name:
-            return "Professional/Specialty"
-    return "Technical"
-
-def classify_claude(name):
-    if "Architect" in name and "Professional" in name:
-        return "CCAR-P"
-    if "Architect" in name and "Foundations" in name:
-        return "CCAR-F"
-    if "Developer" in name and "Foundations" in name:
-        return "CCDV-F"
-    if "Associate" in name and "Foundations" in name:
-        return "CCAO-F"
-    return "CCAO-F"
 
 def is_active(item):
+    if item.get("status") == "bad_expiry":
+        return False
+
     expires = item.get("expires_at", "")
     if not expires or expires == "no-expiry":
         return True
     try:
-        exp_date = datetime.fromisoformat(expires)
+        exp_date = datetime.fromisoformat(expires.replace("Z", "+00:00"))
         now = datetime.now(timezone.utc)
         if exp_date.tzinfo is None:
             exp_date = exp_date.replace(tzinfo=timezone.utc)
         return exp_date > now
     except (ValueError, TypeError):
+        return False
+
+
+def is_bad_expiry(item):
+    if item.get("status") == "bad_expiry":
         return True
+
+    expires = item.get("expires_at", "")
+    if not expires or expires == "no-expiry":
+        return False
+    try:
+        datetime.fromisoformat(expires.replace("Z", "+00:00"))
+        return False
+    except (ValueError, TypeError):
+        return True
+
 
 def _norm(s):
     """Lower-case, trim, collapse internal whitespace."""
@@ -297,14 +320,18 @@ def get_credly_accounts():
             credly_username=u.get("credly_username", ""),
         )
         # Display name: prefer the stored name, else derive from employee_id (first.last)
-        display = (u.get("name") or "").strip() or " ".join(w.capitalize() for w in employee_id.replace(".", " ").split())
-        accounts.append({
-            "keys": keys,
-            "credly_username": u.get("credly_username", ""),
-            "name": display,
-            "email": u.get("email", ""),
-            "employee_id": employee_id,
-        })
+        display = (u.get("name") or "").strip() or " ".join(
+            w.capitalize() for w in employee_id.replace(".", " ").split()
+        )
+        accounts.append(
+            {
+                "keys": keys,
+                "credly_username": u.get("credly_username", ""),
+                "name": display,
+                "email": u.get("email", ""),
+                "employee_id": employee_id,
+            }
+        )
     return accounts
 
 
@@ -321,7 +348,9 @@ def build_apn_network(roster, aws_holder_ids, aws_counts=None):
     matched, missing = [], []
     all_roster_keys = set()
     for person in roster.get("people", []):
-        person_keys = _identity_keys(name=person.get("name", ""), email=person.get("email", ""))
+        person_keys = _identity_keys(
+            name=person.get("name", ""), email=person.get("email", "")
+        )
         all_roster_keys |= person_keys
         entry = {
             "name": person.get("name", ""),
@@ -341,8 +370,11 @@ def build_apn_network(roster, aws_holder_ids, aws_counts=None):
     # Excludes anyone without an AWS cert (e.g. Anthropic-only or no certs).
     aws_counts = aws_counts or {}
     credly_only = [
-        {"name": a["name"], "credly_username": a["credly_username"],
-         "aws_cert_count": aws_counts.get(a["employee_id"], 0)}
+        {
+            "name": a["name"],
+            "credly_username": a["credly_username"],
+            "aws_cert_count": aws_counts.get(a["employee_id"], 0),
+        }
         for a in accounts
         if a["employee_id"] in aws_holder_ids and not (a["keys"] & all_roster_keys)
     ]
@@ -363,7 +395,9 @@ def build_apn_network(roster, aws_holder_ids, aws_counts=None):
             {"name": name, "count": cnt}
             for name, cnt in sorted(tier_map[t].items(), key=lambda x: (-x[1], x[0]))
         ]
-        redacted_breakdown.append({"tier": t, "count": sum(c["count"] for c in certs), "certs": certs})
+        redacted_breakdown.append(
+            {"tier": t, "count": sum(c["count"] for c in certs), "certs": certs}
+        )
     # APN-side tier totals as distinct NAMED individuals (same tier logic as the Credly
     # side), for the Credly-vs-APN comparison. Redacted records can't be attributed to a
     # person, so they're excluded here (a lower bound on AWS's true count).
@@ -397,20 +431,51 @@ def build_apn_network(roster, aws_holder_ids, aws_counts=None):
 
 
 def _headers():
-    return {"Content-Type": "application/json", "Access-Control-Allow-Origin": os.environ.get("ALLOWED_ORIGIN", "")}
+    return {
+        "Content-Type": "application/json",
+        "Access-Control-Allow-Origin": os.environ.get("ALLOWED_ORIGIN", ""),
+    }
 
 
 def _resp(status, body):
     return {"statusCode": status, "headers": _headers(), "body": json.dumps(body)}
 
 
+def _scan_all_items(table):
+    resp = table.scan()
+    items = resp.get("Items", [])
+    while "LastEvaluatedKey" in resp:
+        resp = table.scan(ExclusiveStartKey=resp["LastEvaluatedKey"])
+        items.extend(resp.get("Items", []))
+    return items
+
+
 def handle_roster_upload(event):
     """POST /apn-roster — parse an uploaded CSV, store it in S3, return a summary."""
+    if not _is_admin(event):
+        return _resp(403, {"error": "You don't have permission to upload APN rosters."})
     if not ROSTER_BUCKET:
-        return _resp(500, {"error": "Roster storage is not configured (ROSTER_BUCKET unset)."})
+        return _resp(
+            500, {"error": "Roster storage is not configured (ROSTER_BUCKET unset)."}
+        )
     body = event.get("body") or ""
     if event.get("isBase64Encoded"):
-        body = base64.b64decode(body).decode("utf-8", errors="replace")
+        body_bytes = base64.b64decode(body)
+        if len(body_bytes) > MAX_APN_CSV_BYTES:
+            return _resp(
+                413,
+                {
+                    "error": "APN CSV upload is too large. Please upload a CSV no larger than 10 MB."
+                },
+            )
+        body = body_bytes.decode("utf-8", errors="replace")
+    elif len(body.encode("utf-8")) > MAX_APN_CSV_BYTES:
+        return _resp(
+            413,
+            {
+                "error": "APN CSV upload is too large. Please upload a CSV no larger than 10 MB."
+            },
+        )
     if not body.strip():
         return _resp(400, {"error": "Empty upload — no CSV content received."})
     try:
@@ -419,30 +484,43 @@ def handle_roster_upload(event):
         return _resp(400, {"error": str(e)})
     except Exception as e:
         logger.error(f"Failed to parse APN CSV: {e}")
-        return _resp(400, {"error": "Could not parse the CSV. Check that it's the APN certification export."})
+        return _resp(
+            400,
+            {
+                "error": "Could not parse the CSV. Check that it's the APN certification export."
+            },
+        )
     s3.put_object(
-        Bucket=ROSTER_BUCKET, Key=ROSTER_KEY,
-        Body=json.dumps(roster).encode("utf-8"), ContentType="application/json",
+        Bucket=ROSTER_BUCKET,
+        Key=ROSTER_KEY,
+        Body=json.dumps(roster).encode("utf-8"),
+        ContentType="application/json",
     )
-    logger.info(f"Stored APN roster: {len(roster['people'])} people, {roster['redacted_count']} redacted")
-    return _resp(200, {
-        "ok": True,
-        "named_people": len(roster["people"]),
-        "redacted_count": roster["redacted_count"],
-        "uploaded_at": roster["uploaded_at"],
-    })
+    logger.info(
+        f"Stored APN roster: {len(roster['people'])} people, {roster['redacted_count']} redacted"
+    )
+    return _resp(
+        200,
+        {
+            "ok": True,
+            "named_people": len(roster["people"]),
+            "redacted_count": roster["redacted_count"],
+            "uploaded_at": roster["uploaded_at"],
+        },
+    )
 
 
 def handle_compliance(event, context=None):
     table = dynamodb.Table(CERTS_TABLE)
-    items = table.scan().get("Items", [])
+    items = _scan_all_items(table)
     # employee_ids that hold at least one *active* AWS cert on Credly (used to scope
     # the "On Credly, Not on APN" list). Active-only on purpose: someone whose AWS
     # certs are all expired has nothing to share toward the partner tier, so they
     # shouldn't be flagged or notified. This also drops rows mis-attributed via a
     # wrong/shared credly_username, which were showing up with no active-cert count.
     aws_holder_ids = {
-        it.get("employee_id", "") for it in items
+        it.get("employee_id", "")
+        for it in items
         if "AWS Certified" in it.get("certification_name", "")
         and is_real_cert(it.get("certification_name", ""))
         and is_active(it)
@@ -454,8 +532,18 @@ def handle_compliance(event, context=None):
     # AWS partner tiers are measured in DISTINCT CERTIFIED INDIVIDUALS, not certs — a
     # person holding 3 Technical certs counts once. "Technical" = any non-Foundational
     # cert (Associate/Professional/Specialty); Professional/Specialty is a SUBSET of it.
-    aws_individuals = {"Foundational": set(), "Technical": set(), "Professional/Specialty": set()}
-    claude_individuals = {"CCAR-F": set(), "CCAR-P": set(), "CCDV-F": set(), "CCAO-F": set()}
+    aws_individuals = {
+        "Foundational": set(),
+        "Technical": set(),
+        "Professional/Specialty": set(),
+    }
+    claude_individuals = {
+        "CCAR-F": set(),
+        "CCAR-P": set(),
+        "CCDV-F": set(),
+        "CCAO-F": set(),
+    }
+
     # A person can hold more than one Credly badge for the SAME credential (e.g. a
     # re-certification issues a new badge id, and Credly sometimes returns one record
     # with no expiry and another with a real one). Collapse those to a single entry per
@@ -465,15 +553,31 @@ def handle_compliance(event, context=None):
     def expiry_rank(entry):
         exp = entry.get("expires_at", "")
         if not exp or exp == "no-expiry":
-            return (0, "")          # placeholder — lowest priority
-        return (1, exp)             # real expiry — later ISO string sorts higher
+            return (0, "")  # placeholder — lowest priority
+        return (1, exp)  # real expiry — later ISO string sorts higher
+
     best = {}
+    expiry_warnings = []
     for item in items:
-        if not is_active(item):
-            continue
         name = item.get("certification_name", "")
         employee = item.get("employee_id", "")
-        entry = {"name": name, "employee": employee, "expires_at": item.get("expires_at", ""), "status": item.get("status", "")}
+        if is_bad_expiry(item):
+            expiry_warnings.append(
+                {
+                    "name": name,
+                    "employee": employee,
+                    "expires_at": item.get("expires_at", ""),
+                    "status": "bad_expiry",
+                }
+            )
+        if not is_active(item):
+            continue
+        entry = {
+            "name": name,
+            "employee": employee,
+            "expires_at": item.get("expires_at", ""),
+            "status": item.get("status", ""),
+        }
         key = (employee, name)
         if key not in best or expiry_rank(entry) > expiry_rank(best[key]):
             best[key] = entry
@@ -497,13 +601,23 @@ def handle_compliance(event, context=None):
                     aws_individuals["Professional/Specialty"].add(employee)
         elif "Claude Certified" in name:
             cband = classify_claude(name)
+            if cband not in CLAUDE_REQS:
+                continue
             claude_grouped[cband].append(entry)
             claude_counts[employee] += 1
             claude_individuals[cband].add(employee)
-    result = {"timestamp": datetime.now(timezone.utc).isoformat(), "aws_tiers": {}, "claude_tiers": {}, "leaderboard": {}}
+    result = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "aws_tiers": {},
+        "claude_tiers": {},
+        "leaderboard": {},
+        "expiry_warnings": sorted(
+            expiry_warnings, key=lambda e: (e["employee"], e["name"], e["expires_at"])
+        ),
+    }
     for t, req in AWS_REQS.items():
         c = aws_grouped.get(t, [])
-        n = len(aws_individuals[t])   # distinct certified individuals, not cert count
+        n = len(aws_individuals[t])  # distinct certified individuals, not cert count
         # One row per distinct person in this tier (each counted once), with how many
         # certs they hold in it — for the "individuals" compliance view on the APN tab.
         per_person = defaultdict(int)
@@ -513,13 +627,27 @@ def handle_compliance(event, context=None):
             ({"employee": emp, "count": cnt} for emp, cnt in per_person.items()),
             key=lambda x: (-x["count"], x["employee"]),
         )
-        result["aws_tiers"][t] = {"current": n, "required": req, "percentage": round((n/req)*100, 1) if req else 0, "certifications": c, "cert_count": len(c), "individuals": individuals}
+        result["aws_tiers"][t] = {
+            "current": n,
+            "required": req,
+            "percentage": round((n / req) * 100, 1) if req else 0,
+            "certifications": c,
+            "cert_count": len(c),
+            "individuals": individuals,
+        }
     for t, req in CLAUDE_REQS.items():
         c = claude_grouped.get(t, [])
         n = len(claude_individuals[t])
-        result["claude_tiers"][t] = {"current": n, "required": req if req > 0 else None, "percentage": round((n/req)*100, 1) if req else None, "certifications": c, "cert_count": len(c)}
+        result["claude_tiers"][t] = {
+            "current": n,
+            "required": req if req > 0 else None,
+            "percentage": round((n / req) * 100, 1) if req else None,
+            "certifications": c,
+            "cert_count": len(c),
+        }
     aws_sorted = sorted(aws_counts.items(), key=lambda x: x[1], reverse=True)
     claude_sorted = sorted(claude_counts.items(), key=lambda x: x[1], reverse=True)
+
     def with_ranks(entries, max_rank=10):
         # Dense ranking: ties share a rank, and the next distinct count is rank+1
         # (not rank + number of people tied), e.g. 1,1,1,1,2,2,3 rather than 1,1,1,1,5,5,7.
@@ -536,13 +664,22 @@ def handle_compliance(event, context=None):
                 break
             ranked.append({"employee": emp, "count": cnt, "rank": rank})
         return ranked
+
     result["leaderboard"]["aws"] = with_ranks(aws_sorted)
     result["leaderboard"]["claude"] = with_ranks(claude_sorted)
     result["apn_network"] = build_apn_network(get_roster(), aws_holder_ids, aws_counts)
-    return {"statusCode": 200, "headers": {"Content-Type": "application/json", "Access-Control-Allow-Origin": os.environ.get("ALLOWED_ORIGIN", "")}, "body": json.dumps(result)}
+    return {
+        "statusCode": 200,
+        "headers": {
+            "Content-Type": "application/json",
+            "Access-Control-Allow-Origin": os.environ.get("ALLOWED_ORIGIN", ""),
+        },
+        "body": json.dumps(result),
+    }
 
 
 # ───────────────────────── User management ─────────────────────────
+
 
 def _caller_email(event):
     """Email of the authenticated caller, from the Cognito authorizer claims."""
@@ -556,6 +693,29 @@ def _caller_email(event):
 def _is_admin(event):
     email = _caller_email(event)
     return bool(email) and email in ADMIN_EMAILS
+
+
+def _validate_admin_identifier(value, field_name, required=False):
+    if value is None:
+        value = ""
+    if not isinstance(value, str):
+        return "", f"{field_name} must be a string."
+
+    normalized = value.strip()
+    if required and not normalized:
+        return "", f"{field_name} is required (e.g. first.last)."
+    if not normalized:
+        return "", None
+    if len(normalized) > MAX_ADMIN_IDENTIFIER_LENGTH:
+        return (
+            "",
+            f"{field_name} must be {MAX_ADMIN_IDENTIFIER_LENGTH} characters or fewer.",
+        )
+    if any(ord(ch) < 32 or ord(ch) == 127 for ch in normalized):
+        return "", f"{field_name} cannot contain control characters."
+    if any(delimiter in normalized for delimiter in ADMIN_IDENTIFIER_DELIMITERS):
+        return "", f"{field_name} cannot contain path, query, or fragment delimiters."
+    return normalized, None
 
 
 def handle_list_users(event):
@@ -578,7 +738,9 @@ def handle_list_users(event):
     )
     # is_admin tells the frontend whether to show edit controls; the real
     # enforcement is on the write endpoints below, not here.
-    return _resp(200, {"users": users, "count": len(users), "is_admin": _is_admin(event)})
+    return _resp(
+        200, {"users": users, "count": len(users), "is_admin": _is_admin(event)}
+    )
 
 
 def handle_upsert_user(event):
@@ -590,10 +752,16 @@ def handle_upsert_user(event):
         data = json.loads(event.get("body") or "{}")
     except ValueError:
         return _resp(400, {"error": "Invalid JSON body."})
-    employee_id = (data.get("employee_id") or "").strip()
-    if not employee_id:
-        return _resp(400, {"error": "employee_id is required (e.g. first.last)."})
-    credly_username = (data.get("credly_username") or "").strip()
+    employee_id, error = _validate_admin_identifier(
+        data.get("employee_id"), "employee_id", required=True
+    )
+    if error:
+        return _resp(400, {"error": error})
+    credly_username, error = _validate_admin_identifier(
+        data.get("credly_username"), "credly_username"
+    )
+    if error:
+        return _resp(400, {"error": error})
     # update_item upserts (creates if the key is absent) and preserves any other
     # attributes on the record that this form doesn't manage.
     dynamodb.Table(USERS_TABLE).update_item(
@@ -602,9 +770,16 @@ def handle_upsert_user(event):
         ExpressionAttributeValues={":c": credly_username},
     )
     logger.info(f"User {employee_id} upserted by {_caller_email(event)}")
-    return _resp(200, {"ok": True, "user": {
-        "employee_id": employee_id, "credly_username": credly_username,
-    }})
+    return _resp(
+        200,
+        {
+            "ok": True,
+            "user": {
+                "employee_id": employee_id,
+                "credly_username": credly_username,
+            },
+        },
+    )
 
 
 def handle_delete_user(event):
@@ -631,9 +806,16 @@ def handle_delete_user(event):
         items.extend(resp.get("Items", []))
     with certs.batch_writer() as bw:
         for it in items:
-            bw.delete_item(Key={"employee_id": employee_id, "certification_id": it["certification_id"]})
+            bw.delete_item(
+                Key={
+                    "employee_id": employee_id,
+                    "certification_id": it["certification_id"],
+                }
+            )
     dynamodb.Table(USERS_TABLE).delete_item(Key={"employee_id": employee_id})
-    logger.info(f"User {employee_id} deleted ({len(items)} certs) by {_caller_email(event)}")
+    logger.info(
+        f"User {employee_id} deleted ({len(items)} certs) by {_caller_email(event)}"
+    )
     return _resp(200, {"ok": True, "deleted": employee_id, "certs_removed": len(items)})
 
 
@@ -649,7 +831,9 @@ def handle_trigger_sync(event):
         Payload=b"{}",
     )
     logger.info(f"Badge sync triggered by {_caller_email(event)}")
-    return _resp(202, {"ok": True, "message": "Sync started — badges refresh in ~1-2 minutes."})
+    return _resp(
+        202, {"ok": True, "message": "Sync started — badges refresh in ~1-2 minutes."}
+    )
 
 
 def _email_for(acct):
@@ -664,7 +848,7 @@ def _email_for(acct):
     return f"{eid}@{EMAIL_DOMAIN}" if eid else ""
 
 
-def post_apn_gap_digest(dry_run=False):
+def post_apn_gap_digest(dry_run=False, compliance_data=None):
     """Weekly digest: the 'AWS cert on Credly but not on APN' list, @-tagging each person.
 
     Reuses handle_compliance so the list matches the dashboard exactly, and resolves each
@@ -672,14 +856,22 @@ def post_apn_gap_digest(dry_run=False):
     Skips entirely when nobody is in the gap. dry_run=True composes the message (tags and
     all) and RETURNS it without posting — preview without pinging anyone.
     """
-    data = json.loads(handle_compliance({})["body"])
+    data = (
+        compliance_data
+        if compliance_data is not None
+        else json.loads(handle_compliance({})["body"])
+    )
     gap = data.get("apn_network", {}).get("credly_only", [])
     if not gap:
         logger.info("APN gap digest: nobody in the gap — skipping Slack post.")
         return _resp(200, {"posted": False, "count": 0, "message": ""})
     # credly_username -> account (has employee_id/email). Server-side only; email is never
     # sent to the browser. Used to derive the lookup email for Slack tagging.
-    acct_by_user = {a["credly_username"]: a for a in get_credly_accounts() if a.get("credly_username")}
+    acct_by_user = {
+        a["credly_username"]: a
+        for a in get_credly_accounts()
+        if a.get("credly_username")
+    }
     lines, tagged, unresolved = [], 0, []
     for p in gap:
         acct = acct_by_user.get(p.get("credly_username", ""))
@@ -706,17 +898,38 @@ def post_apn_gap_digest(dry_run=False):
     )
     message = header + "\n" + "\n".join(lines) + "\n\n" + GAP_INSTRUCTIONS
     if dry_run:
-        logger.info(f"APN gap digest DRY RUN: {len(gap)} people, {tagged} tagged, {len(unresolved)} unresolved (not posted)")
-        return _resp(200, {"posted": False, "dry_run": True, "count": len(gap),
-                           "tagged": tagged, "unresolved": unresolved, "message": message})
+        logger.info(
+            f"APN gap digest DRY RUN: {len(gap)} people, {tagged} tagged, {len(unresolved)} unresolved (not posted)"
+        )
+        return _resp(
+            200,
+            {
+                "posted": False,
+                "dry_run": True,
+                "count": len(gap),
+                "tagged": tagged,
+                "unresolved": unresolved,
+                "message": message,
+            },
+        )
     posted = post_slack(message)
     logger.info(f"APN gap digest: {len(gap)} people, {tagged} tagged, posted={posted}")
-    return _resp(200, {"posted": posted, "count": len(gap), "tagged": tagged, "unresolved": unresolved})
+    return _resp(
+        200,
+        {
+            "posted": posted,
+            "count": len(gap),
+            "tagged": tagged,
+            "unresolved": unresolved,
+        },
+    )
 
 
 def _title(eid):
     """employee_id (first.last) -> 'First Last' for display."""
-    return " ".join(w.capitalize() for w in (eid or "").replace(".", " ").replace("-", " ").split()) or (eid or "")
+    return " ".join(
+        w.capitalize() for w in (eid or "").replace(".", " ").replace("-", " ").split()
+    ) or (eid or "")
 
 
 # kind -> (leaderboard key, title, unit label)
@@ -726,7 +939,9 @@ LEADERBOARD_META = {
 }
 
 
-def post_leaderboard(kind="aws", dry_run=False, webhook_secret=None):
+def post_leaderboard(
+    kind="aws", dry_run=False, webhook_secret=None, compliance_data=None
+):
     """Monthly certification leaderboard — a monospace bar chart, NO @-pings.
 
     Uses the same dense-ranked leaderboard the dashboard shows (kind = 'aws' or 'claude').
@@ -734,13 +949,17 @@ def post_leaderboard(kind="aws", dry_run=False, webhook_secret=None):
     message without posting; webhook_secret picks the destination channel.
     """
     key, title, unit = LEADERBOARD_META.get(kind, LEADERBOARD_META["aws"])
-    data = json.loads(handle_compliance({})["body"])
+    data = (
+        compliance_data
+        if compliance_data is not None
+        else json.loads(handle_compliance({})["body"])
+    )
     lb = data.get("leaderboard", {}).get(key, [])
     if not lb:
         logger.info(f"Leaderboard[{kind}]: nobody certified — skipping.")
         return _resp(200, {"posted": False, "count": 0, "message": ""})
     MEDALS = {1: "🥇", 2: "🥈", 3: "🥉"}
-    COLLAPSE_OVER = 5   # groups bigger than this collapse to one summary line
+    COLLAPSE_OVER = 5  # groups bigger than this collapse to one summary line
     BAR_CAP = 12
     # Group consecutive entries by rank (already sorted by rank ascending).
     groups = []
@@ -749,22 +968,33 @@ def post_leaderboard(kind="aws", dry_run=False, webhook_secret=None):
             groups[-1][1].append(e)
         else:
             groups.append((e["rank"], [e]))
+
     # Collapse only the deep tail (rank 4+); medal ranks (1-3) always show every name.
     def collapsed(rank, members):
         return rank > 3 and len(members) > COLLAPSE_OVER
-    indiv = [_title(m["employee"]) for r, members in groups if not collapsed(r, members) for m in members]
+
+    indiv = [
+        _title(m["employee"])
+        for r, members in groups
+        if not collapsed(r, members)
+        for m in members
+    ]
     w = min(max((len(n) for n in indiv), default=10), 22)
     lines = []
     for rank, members in groups:
         if collapsed(rank, members):
             c = members[0]["count"]
-            lines.append(f"{rank:>2}  …and {len(members)} teammates with {c} cert{'s' if c != 1 else ''} each")
+            lines.append(
+                f"{rank:>2}  …and {len(members)} teammates with {c} cert{'s' if c != 1 else ''} each"
+            )
         else:
             for m in members:
                 c = m["count"]
                 bar = ("█" * min(c, BAR_CAP)).ljust(BAR_CAP)
                 medal = f"  {MEDALS[rank]}" if rank in MEDALS else ""
-                lines.append(f"{rank:>2}  {_title(m['employee']).ljust(w)}  {bar}  {c}{medal}")
+                lines.append(
+                    f"{rank:>2}  {_title(m['employee']).ljust(w)}  {bar}  {c}{medal}"
+                )
     total_certs = sum(e["count"] for e in lb)
     people = len(lb)
     rule = "─" * 50
@@ -776,7 +1006,10 @@ def post_leaderboard(kind="aws", dry_run=False, webhook_secret=None):
     message = "```\n" + body + "\n```"
     if dry_run:
         logger.info(f"Leaderboard[{kind}] DRY RUN: {people} people (not posted)")
-        return _resp(200, {"posted": False, "dry_run": True, "people": people, "message": message})
+        return _resp(
+            200,
+            {"posted": False, "dry_run": True, "people": people, "message": message},
+        )
     posted = post_slack(message, webhook_secret=webhook_secret)
     logger.info(f"Leaderboard[{kind}]: {people} people, posted={posted}")
     return _resp(200, {"posted": posted, "people": people})
@@ -794,8 +1027,11 @@ def lambda_handler(event, context):
         return post_leaderboard("aws", dry_run=bool(event.get("dry_run")))
     # {"task":"anthropic_leaderboard","dry_run":true} — posts to the Anthropic channel.
     if event.get("task") == "anthropic_leaderboard":
-        return post_leaderboard("claude", dry_run=bool(event.get("dry_run")),
-                                webhook_secret=SLACK_ANTHROPIC_WEBHOOK_SECRET)
+        return post_leaderboard(
+            "claude",
+            dry_run=bool(event.get("dry_run")),
+            webhook_secret=SLACK_ANTHROPIC_WEBHOOK_SECRET,
+        )
     method = (event.get("httpMethod") or "").upper()
     resource = event.get("resource") or event.get("path") or ""
     if method == "OPTIONS":
